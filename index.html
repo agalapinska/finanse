@@ -110,6 +110,9 @@ strong{font-weight:650}
 .empty{color:var(--muted);padding:6px 0 2px}
 .note{font-size:13px;color:var(--text-2);background:var(--surface-2);border-radius:var(--r-s);padding:10px 12px;margin-top:12px}
 .note.warn{background:var(--warn-soft);color:var(--warn)}
+.note.hint{display:flex;align-items:center;gap:4px;margin:0 0 6px;padding-right:4px}
+.note.hint span{flex:1}
+.note.hint .ib{flex:none;width:40px;height:40px;margin:-6px 0}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-top:1px solid var(--line)}
 .kv:first-child{border-top:0}
 .kv span:first-child{color:var(--text-2)}
@@ -436,7 +439,7 @@ function save(touch=true){
   try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){STORE_OK=false;if(!save.warned){save.warned=1;setTimeout(()=>toast('Uwaga: ta przeglądarka nie zapisuje danych (tryb podglądu lub prywatny)'),400)}}
 }
 const tsLabel=ms=>{if(!ms)return'—';const d=new Date(ms),t=iso(d);return`${t===today()?'dziś':dLabel(t)+(t.slice(0,4)!==today().slice(0,4)?' '+t.slice(0,4):'')}, ${pad(d.getHours())}:${pad(d.getMinutes())}`};
-const U={tab:'start',ym:ymNow(),scope:'lawina',open:new Set(),q:{amt:'',note:'',date:null}};
+const U={tab:'start',ym:ymNow(),scope:'lawina',open:new Set(),q:{amt:'',note:'',date:null},hint:true};
 let _sim=null;
 
 /* ---------- model: miesiąc, budżet ---------- */
@@ -733,7 +736,7 @@ function setupCard(){
   if(steps[0][0]&&steps[1][0])return'';
   const fresh=!S.updatedAt;
   return`<section class="card"><div class="h"><span>Pierwsze kroki</span><small>${steps.filter(x=>x[0]).length} z 4</small></div>
-    ${fresh?`<div class="note" style="margin:0 0 6px">Masz plik z danymi z innego urządzenia? <button class="link" data-act="import">Wczytaj go</button> — wszystko ustawi się samo.</div>`:''}
+    ${fresh&&U.hint?`<div class="note hint"><span>Masz plik z danymi z innego urządzenia? <button class="link" data-act="import">Wczytaj go</button> — wszystko ustawi się samo.</span><button class="ib" data-act="hintClose" aria-label="Zamknij podpowiedź">${ico('x',18)}</button></div>`:''}
     ${steps.map(([ok,t,sub,act,tab])=>`<button class="srow" data-act="${act}" data-tab="${tab}"><span class="ck ${ok?'on':''}"></span><span class="rt"><b>${t}</b><small>${sub}</small></span><span class="chev">${ico('r',18)}</span></button>`).join('')}</section>`;
 }
 function vStart(){
@@ -1095,7 +1098,8 @@ function toast(msg,act){
 const catOpts=()=>S.categories.map(c=>[c.id,c.name]);
 const done=()=>{save();render()};
 const ACT={
-  tab(d){U.tab=d.tab;history.replaceState(null,'','#'+d.tab);render();scrollTo(0,0)},
+  hintClose(){U.hint=false;render()},
+  tab(d){if(d.tab!=='start')U.hint=false;U.tab=d.tab;history.replaceState(null,'','#'+d.tab);render();scrollTo(0,0)},
   month(d){U.ym=ymAdd(U.ym,+d.d);U.q.date=null;render()},
   monthNow(){U.ym=ymNow();U.q.date=null;render()},
   theme(){S.settings.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';save(false);render()},
@@ -1346,6 +1350,7 @@ function render(){
   drawCharts();
 }
 const h0=location.hash.slice(1);if(VIEWS[h0])U.tab=h0;
+U.hint=U.tab==='start'; /* podpowiedź o wczytaniu pliku: tylko przy wejściu do aplikacji */
 save(false);render();
 </script>
 </body>
