@@ -1,5 +1,13 @@
 {
   "v": 1,
-  "devices": {},
-  "updates": []
+  "devices": {
+    "3bohj3mn": {
+      "name": "urządzenie 1",
+      "pub": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAn7jmL+MZUh929CLqEf9cxKwN41+reI+HX9htqWoDaU4BOiPLG3RxI/n2ssYhLKRa7BCOXhpVm50C4owRCJz33rlo0VrWElPJnr+wtzr07WlD10lYz3t8QX5K1D2ESJt31njA8V/tf1r9DCuctEFiZf2RhNQWitG3jXeZCA2ZknOGqWz7qIP5dt2Lnaw+40Z50PO+HR/3S7dBtx2APfIm/w41ENv1eK3Nti8cWDnBNFyyhKV8v1qm8UmiccLdCw5kKfNSNHPej5n1tavfiDe8UN7im6j/+ZCuCOE1TlTlKrP0jtxhoBrCx2UEJOpwiV7toYTLERL32D/prLUeMtgC6QIDAQAB",
+      "added": "2026-11-12"
+    }
+  },
+  "updates": [
+    "000001"
+  ]
 }
