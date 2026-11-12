@@ -904,7 +904,7 @@ function heroCard(b,ym){
     <div class="big">${fmt(Math.abs(b.left),0)}<small> zł</small></div>
     <div class="bar lg"><i style="width:${pct*100}%"></i>${pace!=null?`<b style="left:${pace*100}%" title="Dzisiejszy dzień miesiąca"></b>`:''}</div>
     <div class="sub">Wydane ${zl(b.manual)} z ${zl(b.varLimit)} zmiennych${cur&&b.left>0?` · <strong>${zl(b.left/dl,0)} dziennie</strong> przez ${dl} ${plural(dl,'dzień','dni','dni')}`:''}</div>
-    <div class="meta">Koszty stałe (${zl(b.fixed+b.res)}) i raty (${zl(bl.raty)}) są już odliczone. <button class="link" data-act="tab" data-tab="budzet">Bilans miesiąca: ${signed(bl.net)}</button></div>
+    <div class="meta">Koszty stałe (${zl(b.fixed+b.res)}) i raty (${zl(bl.raty)}) są już odliczone. <button class="link" data-act="tab" data-tab="budzet">${bl.net<0?`Plan na stałych wpływach: brakuje ${zl(-bl.net,0)}`:`Plan na stałych wpływach: zapas ${zl(bl.net,0)}`}</button></div>
   </section>`;
 }
 /* Pieniądze w skali miesiąca: wszystkie wpływy minus to, co obowiązkowe, odłożone i już wydane. */
