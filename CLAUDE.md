@@ -24,6 +24,15 @@ Tryb „płacę kartą i co miesiąc spłacam cały wyciąg” (`S.card`, `S.car
 - Stałe pozycje „kartą” liczą się od `card.since` (dzień włączenia trybu) i są wliczane z góry.
 - Wpis w `cardPays` z `full:true` zamyka wyciąg; bez niego to wcześniejsza spłata zmniejszająca kwotę do zapłaty.
 
+## Synchronizacja urządzeń
+
+Dwukierunkowa, między urządzeniami użytkowniczki (`CLOUD`, `cloudSync()`). Cały stan `S` jest szyfrowany AES-GCM kluczem z hasła (PBKDF2) i zapisywany jako `dane.json` w jej **osobnym, prywatnym repozytorium** przez GitHub API. Token, klucz i znacznik `base` leżą w localStorage pod `finanse-domowe-v1-chmura`, poza plikiem z danymi.
+
+- Claude nie zna hasła i nie czyta tych danych — tak wybrała użytkowniczka. Nie proś o hasło ani token.
+- Reguła: stan z drugiej strony jest przyjmowany tylko wtedy, gdy lokalny nie zmienił się od ostatniej zgodności (`S.updatedAt === base`). Gdy zmieniły się obie strony, aplikacja pyta, którą wersję zostawić, a drugą zapisuje pod `finanse-domowe-v1-kopia-sync`.
+- Nieudane odszyfrowanie nigdy nie może kończyć się zapisem do repozytorium.
+- `save(false)` nie zmienia `updatedAt`, więc nie wyzwala wysyłki. Formularz, który nie powinien oznaczać danych jako zmienione, musi zwrócić `false` z `onSubmit` i zamknąć się sam.
+
 ## Zmiany od Claude (`sync/`)
 
 Kanał jednokierunkowy: Claude → aplikacja. Aplikacja przy otwarciu pobiera `sync/index.json`, odszyfrowuje paczki o numerze wyższym niż `S.sync.last` i wykonuje ich operacje. Paczka to lista operacji, nie cały stan, więc lokalne zmiany użytkowniczki zostają.

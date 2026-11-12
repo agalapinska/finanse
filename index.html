@@ -440,6 +440,7 @@ let STORE_OK=true;try{localStorage.setItem(KEY+'-t','1');localStorage.removeItem
 function save(touch=true){
   if(touch){S.updatedAt=Date.now();if(!save.asked){save.asked=1;try{navigator.storage?.persist?.()}catch(e){}}}
   S.history[ymNow()]=Object.fromEntries(S.debts.map(d=>[d.id,d.balance]));
+  if(touch&&typeof cloudSoon==='function')cloudSoon();
   try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){STORE_OK=false;if(!save.warned){save.warned=1;setTimeout(()=>toast('Uwaga: ta przeglądarka nie zapisuje danych (tryb podglądu lub prywatny)'),400)}}
 }
 const tsLabel=ms=>{if(!ms)return'—';const d=new Date(ms),t=iso(d);return`${t===today()?'dziś':dLabel(t)+(t.slice(0,4)!==today().slice(0,4)?' '+t.slice(0,4):'')}, ${pad(d.getHours())}:${pad(d.getMinutes())}`};
@@ -708,6 +709,7 @@ function applyOps(ops){
 }
 async function syncCheck(manual){
   if(!DEV||!syncOK()||SY.busy||$('#sheet').open)return;
+  if(CL.busy){setTimeout(()=>syncCheck(manual),500);return}
   SY.busy=true;let n=0,snap=null;const notes=[];
   const get=async u=>{const r=await fetch(`${u}?t=${Date.now()}`,{cache:'no-store'});if(!r.ok)throw new Error('brak połączenia z '+u);return r.json()};
   try{
@@ -753,6 +755,97 @@ function syncCard(){
     <div class="kv"><span>Ostatnia paczka</span><span class="am">${S.sync.last?'nr '+(+S.sync.last):'—'}</span></div>
     ${SY.err?`<div class="note warn">Ostatnie sprawdzenie nie powiodło się (${esc(SY.err)}).</div>`:''}
     <div class="btns">${DEV.paired?`<button class="btn sm primary" data-act="syncNow">Sprawdź teraz</button><button class="btn sm ghost" data-act="syncCopy">Kod urządzenia</button>`:`<button class="btn sm primary" data-act="syncCopy">Kopiuj kod urządzenia</button><button class="btn sm ghost" data-act="syncNow">Sprawdź teraz</button>`}<button class="btn sm del" data-act="syncOff">Wyłącz</button></div></section>`;
+}
+
+/* ---------- synchronizacja urządzeń: zaszyfrowany stan w prywatnym repozytorium GitHub ----------
+   Cały stan (S) jest szyfrowany AES-GCM kluczem z hasła (PBKDF2) i zapisywany jako dane.json w prywatnym repozytorium
+   użytkowniczki. Token, klucz i znacznik ostatniej zgodności (base) leżą w osobnym wpisie localStorage — poza plikiem
+   z danymi. Zasada: nowszy stan wygrywa tylko wtedy, gdy druga strona się nie zmieniła; inaczej decyduje człowiek. */
+const CLOUD_KEY=KEY+'-chmura',BAK_KEY=KEY+'-kopia-sync',CL={busy:false,again:0,at:null,err:'',timer:0};
+let CLOUD=null;try{CLOUD=JSON.parse(localStorage.getItem(CLOUD_KEY)||'null')}catch(e){}
+const cloudStore=()=>{try{CLOUD?localStorage.setItem(CLOUD_KEY,JSON.stringify(CLOUD)):localStorage.removeItem(CLOUD_KEY)}catch(e){}};
+const b64e=u=>{let t='';for(let i=0;i<u.length;i+=0x8000)t+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000));return btoa(t)};
+const cloudDirty=()=>!!CLOUD&&(S.updatedAt||0)!==(CLOUD.base||0);
+async function cloudKeyFrom(pass,repo){
+  const te=new TextEncoder(),salt=await crypto.subtle.digest('SHA-256',te.encode('finanse-domowe:'+repo.toLowerCase()));
+  const k=await crypto.subtle.importKey('raw',te.encode(pass),'PBKDF2',false,['deriveBits']);
+  return b64e(new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},k,256)));
+}
+const cloudAes=()=>crypto.subtle.importKey('raw',unb64(CLOUD.key),'AES-GCM',false,['encrypt','decrypt']);
+const cloudHead=()=>({Authorization:'Bearer '+CLOUD.token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});
+const cloudApi=(method,body)=>fetch(`https://api.github.com/repos/${CLOUD.repo}/contents/dane.json${body?'':'?t='+Date.now()}`,{method,cache:'no-store',headers:cloudHead(),body:body?JSON.stringify(body):undefined});
+const cloudDeny=r=>{if(r.status===401)throw new Error('token jest nieważny lub wygasł');if(r.status===403||r.status===404)throw new Error('brak dostępu — sprawdź nazwę repozytorium i uprawnienia tokenu');if(!r.ok)throw new Error('GitHub odpowiedział błędem '+r.status)};
+async function cloudPush(sha){
+  const iv=crypto.getRandomValues(new Uint8Array(12)),at=S.updatedAt||0;
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},await cloudAes(),new TextEncoder().encode(JSON.stringify(S)));
+  const r=await cloudApi('PUT',Object.assign({message:'sync',content:btoa(JSON.stringify({v:1,updatedAt:at,iv:b64e(iv),ct:b64e(new Uint8Array(ct))}))},sha?{sha}:null));
+  if(r.status===409||r.status===422){if(++CL.again>3)throw new Error('nie udało się zapisać — spróbuj ponownie');return}
+  cloudDeny(r);CL.again=0;CLOUD.base=at;cloudStore();
+}
+function cloudAdopt(R){
+  const th=S.settings.theme;S=migrate(R);S.settings.theme=th;CLOUD.base=S.updatedAt||0;cloudStore();
+  if(U.ym>ymNow()||!S.expenses.length)U.ym=ymNow();save(false);render();
+}
+function cloudConflict(R){
+  if($('#sheet').open)return;
+  const n=x=>{const k=(x.expenses||[]).length;return`${k} ${plural(k,'wydatek','wydatki','wydatków')}`};
+  sheet({title:'Różne dane na urządzeniach',desc:`Tutaj i na innym urządzeniu są zmiany zrobione niezależnie od siebie.<br><br><strong>To urządzenie:</strong> ${tsLabel(S.updatedAt)} · ${n(S)}<br><strong>Inne urządzenie:</strong> ${tsLabel(R.updatedAt)} · ${n(R)}<br><br>Wybierz, która wersja zostaje. Drugą zachowam jako kopię na tym urządzeniu.`,
+    fields:[{k:'pick',label:'Zostaje wersja',type:'select',opts:[['remote','z innego urządzenia'],['local','z tego urządzenia']],value:(R.updatedAt||0)>=(S.updatedAt||0)?'remote':'local'}],submit:'Zastosuj',
+    onSubmit(v){
+      $('#sheet').close();
+      try{localStorage.setItem(BAK_KEY,JSON.stringify(v.pick==='remote'?S:R))}catch(e){}
+      if(v.pick==='remote'){cloudAdopt(R);toast('Wczytano dane z innego urządzenia')}
+      else{CLOUD.base=R.updatedAt||0;cloudStore();cloudSync(true)}
+      return false;
+    }});
+}
+async function cloudSync(manual){
+  if(!CLOUD||!syncOK())return;
+  if(CL.busy||SY.busy){clearTimeout(CL.timer);CL.timer=setTimeout(()=>cloudSync(manual),500);return}
+  if($('#sheet').open)return;
+  CL.busy=true;clearTimeout(CL.timer);CL.timer=0;let got=false,retry=false;
+  try{
+    const r=await cloudApi('GET');let R=null,sha=null;
+    if(r.status!==404){
+      cloudDeny(r);const j=await r.json();sha=j.sha;let c=j.content;
+      if(!c&&j.git_url){const g=await fetch(j.git_url,{cache:'no-store',headers:cloudHead()});cloudDeny(g);c=(await g.json()).content} /* plik ponad 1 MB */
+      try{const f=JSON.parse(atob(String(c).replace(/\s/g,'')));R=JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(f.iv)},await cloudAes(),unb64(f.ct))))}
+      catch(e){throw new Error('hasło nie pasuje do danych w repozytorium')}
+      if(!R||!R.settings||!Array.isArray(R.debts))throw new Error('dane w repozytorium są uszkodzone');
+    }
+    const loc=S.updatedAt||0,base=CLOUD.base||0,rem=R?R.updatedAt||0:0,dirty=loc!==base,fresh=!!R&&rem!==base;
+    if(!R){if(loc)await cloudPush(null)}
+    else if(rem===loc){if(dirty){CLOUD.base=loc;cloudStore()}}
+    else if(fresh&&dirty)cloudConflict(R);
+    else if(fresh){cloudAdopt(R);got=true}
+    else if(dirty)await cloudPush(sha);
+    retry=CL.again>0;CL.err='';
+  }catch(e){CL.err=String(e&&e.message||e);CL.again=0}
+  CL.at=Date.now();CL.busy=false;
+  if(retry||cloudDirty()&&!CL.err&&!$('#sheet').open)cloudSoon(retry?300:1500);
+  if(got){toast('Pobrano zmiany z innego urządzenia');syncCheck()}
+  else if(U.tab==='ustawienia'&&!$('#sheet').open)render();
+  if(manual&&!got&&!$('#sheet').open)toast(CL.err?'Synchronizacja nie powiodła się':cloudDirty()?'Wysyłam zmiany…':'Dane są zsynchronizowane');
+}
+function cloudSoon(ms){if(!CLOUD)return;clearTimeout(CL.timer);CL.timer=setTimeout(()=>cloudSync(),ms||1500)}
+async function cloudConnect(v){
+  toast('Łączę z repozytorium…');
+  try{CLOUD={repo:v.repo,token:v.token,key:await cloudKeyFrom(v.pass,v.repo),base:null};CL.err='';CL.again=0;await cloudSync()}catch(e){CL.err=String(e&&e.message||e)}
+  if(CL.err){const e=CL.err;CLOUD=null;CL.err='';cloudStore();render();toast('Nie połączono: '+esc(e))}
+  else{cloudStore();render();if(!$('#sheet').open)toast('Urządzenie połączone — dane synchronizują się same')}
+}
+function cloudCard(){
+  if(!syncOK())return'';
+  let bak=null;try{bak=localStorage.getItem(BAK_KEY)}catch(e){}
+  if(!CLOUD)return`<section class="card"><div class="h"><span>Synchronizacja urządzeń</span></div>
+    <p class="sub" style="margin-top:0">Te same dane w telefonie i w komputerze. Aplikacja trzyma zaszyfrowaną kopię w Twoim prywatnym repozytorium GitHub — bez hasła, które znają tylko Twoje urządzenia, nikt jej nie odczyta.</p>
+    <div class="btns"><button class="btn sm primary" data-act="cloudOn">Połącz to urządzenie</button>${bak?'<button class="btn sm ghost" data-act="cloudBak">Przywróć kopię</button>':''}</div></section>`;
+  const d=cloudDirty();
+  return`<section class="card"><div class="h"><span>Synchronizacja urządzeń</span>${CL.err?'<span class="badge warn">błąd</span>':d?'<span class="badge">czeka na wysłanie</span>':'<span class="badge soft">zsynchronizowane</span>'}</div>
+    <div class="kv"><span>Repozytorium</span><span class="am">${esc(CLOUD.repo)}</span></div>
+    <div class="kv"><span>Ostatnia synchronizacja</span><span class="am">${tsLabel(CL.at)}</span></div>
+    ${CL.err?`<div class="note warn">Nie udało się zsynchronizować: ${esc(CL.err)}. Dane na tym urządzeniu są bezpieczne.</div>`:''}
+    <div class="btns"><button class="btn sm primary" data-act="cloudNow">Synchronizuj teraz</button>${bak?'<button class="btn sm ghost" data-act="cloudBak">Przywróć kopię</button>':''}<button class="btn sm del" data-act="cloudOff">Rozłącz</button></div></section>`;
 }
 
 /* ---------- widok: nagłówek, nawigacja ---------- */
@@ -1134,7 +1227,7 @@ function vUstawienia(){
       ${!STORE_OK?'<div class="note warn">Ta przeglądarka nie pozwala na autozapis (tryb prywatny lub podgląd). Zapisuj dane do pliku przed zamknięciem.</div>':stale?'<div class="note warn">Masz zmiany, których nie ma w żadnym pliku. Zapisz plik — po wyczyszczeniu danych przeglądarki nie da się ich odzyskać.</div>':''}
       <div class="btns"><button class="btn primary sm" data-act="export">Zapisz do pliku</button><button class="btn sm" data-act="import">Wczytaj z pliku</button><button class="btn sm ghost" data-act="copyJson">Kopiuj dane</button><button class="btn sm ghost" data-act="pasteJson">Wklej dane</button></div>
       <div class="btns"><button class="btn sm del" data-act="reset">Wyczyść wszystkie dane</button></div></section>
-    ${syncCard()}
+    ${cloudCard()}${syncCard()}
     ${pd.length?`<section class="card"><div class="h"><span>Do potwierdzenia</span><span class="badge warn">${pd.length}</span></div>
       ${pd.map(p=>`<button class="srow" data-act="${p.act}" ${p.id?`data-id="${p.id}"`:''}><span class="rt"><b>${esc(p.t)}</b></span><span class="chev">${ico('r',18)}</span></button>`).join('')}</section>`:''}
     <section class="card"><div class="h">Wygląd</div>
@@ -1237,6 +1330,7 @@ function fieldHTML(f){
     case'date':return wrap(`<input id="${id}" name="${f.k}" type="date" value="${esc(v)}">`);
     case'select':return wrap(`<select id="${id}" name="${f.k}">${f.opts.map(([k,l])=>`<option value="${esc(k)}" ${String(k)===String(v)?'selected':''}>${esc(l)}</option>`).join('')}</select>`);
     case'check':return wrap(`<label class="tog"><input type="checkbox" id="${id}" name="${f.k}" ${v?'checked':''}>${f.label}</label>`);
+    case'pass':return wrap(`<input id="${id}" name="${f.k}" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${esc(f.ph||'')}" value="${esc(v)}">`);
     case'area':return wrap(`<textarea id="${id}" name="${f.k}" rows="2">${esc(v)}</textarea>`);
     default:return wrap(`<input id="${id}" name="${f.k}" autocomplete="off" placeholder="${esc(f.ph||'')}" value="${esc(v)}">`);
   }
@@ -1265,6 +1359,7 @@ function sheet({title,desc,fields=[],submit='Zapisz',onSubmit,onDelete,delLabel=
         else if(f.min!=null&&x!=null&&x<f.min)err=`Minimum: ${f.min}`;
         else if(f.max!=null&&x!=null&&x>f.max)err=`Maksimum: ${f.max}`;
         else if(f.ym&&x&&!validYM(x))err='Format: RRRR-MM, np. 2027-03';
+        else if(f.check&&x)err=f.check(x)||'';
       }
       w.classList.toggle('err',!!err);$('.e',w)?.remove();
       if(err){w.insertAdjacentHTML('beforeend',`<span class="e">${err}</span>`);bad=bad||el}
@@ -1520,7 +1615,20 @@ const ACT={
   },
   syncNow(){syncCheck(true)},
   syncOff(){confirmSheet('Wyłączyć zmiany od Claude?','To urządzenie przestanie pobierać paczki, a jego klucz zostanie usunięty. Dane w aplikacji zostają bez zmian.','Wyłącz',()=>{DEV=null;try{localStorage.removeItem(SYNC_KEY)}catch(e){}})},
-  reset(){confirmSheet('Wyczyścić wszystkie dane?','Usunie z tego urządzenia wydatki, długi, budżet i ustawienia. Tego nie da się cofnąć — jeśli dane są Ci potrzebne, najpierw zapisz je do pliku.','Wyczyść wszystko',()=>{setTimeout(()=>{const th=S.settings.theme,sl=S.sync.last;S=defaults();S.settings.theme=th;S.sync.last=sl;U.ym=ymNow();save(false);render();toast('Dane wyczyszczone')},0)})},
+  cloudOn(){
+    sheet({title:'Połącz to urządzenie',desc:'Potrzebujesz prywatnego repozytorium na GitHubie i tokenu z dostępem tylko do niego (uprawnienie Contents: Read and write). Na każdym urządzeniu wpisz te same trzy rzeczy. Zacznij od urządzenia z aktualnymi danymi.',fields:[
+      {k:'repo',label:'Repozytorium',value:'',req:1,ph:'login/nazwa-repozytorium',auto:1,check:x=>/^(https?:\/\/github\.com\/)?[\w.-]+\/[\w.-]+\/?$/.test(x)?'':'Wpisz jako login/nazwa-repozytorium'},
+      {k:'token',label:'Token dostępu',type:'pass',req:1,ph:'github_pat_…'},
+      {k:'pass',label:'Hasło szyfrowania',type:'pass',req:1,check:x=>x.length<10?'Minimum 10 znaków':'',hint:'To samo na wszystkich urządzeniach, minimum 10 znaków. Zapisz je w menedżerze haseł — bez niego danych z repozytorium nie da się odczytać.'}],submit:'Połącz',
+      onSubmit(v){
+        v.repo=v.repo.replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/+$/,'');
+        $('#sheet').close();cloudConnect(v);return false;
+      }});
+  },
+  cloudNow(){cloudSync(true)},
+  cloudOff(){confirmSheet('Rozłączyć synchronizację?','To urządzenie przestanie wysyłać i pobierać dane. Dane w aplikacji i w repozytorium zostają bez zmian.','Rozłącz',()=>{setTimeout(()=>{CLOUD=null;clearTimeout(CL.timer);CL.err='';cloudStore();render()},0)})},
+  cloudBak(){let t=null;try{t=localStorage.getItem(BAK_KEY)}catch(e){}if(t)askImport(t)},
+  reset(){confirmSheet('Wyczyścić wszystkie dane?','Usunie z tego urządzenia wydatki, długi, budżet i ustawienia, a synchronizacja urządzeń zostanie tu rozłączona (dane w repozytorium zostają). Tego nie da się cofnąć — jeśli dane są Ci potrzebne, najpierw zapisz je do pliku.','Wyczyść wszystko',()=>{setTimeout(()=>{CLOUD=null;clearTimeout(CL.timer);cloudStore();const th=S.settings.theme,sl=S.sync.last;S=defaults();S.settings.theme=th;S.sync.last=sl;U.ym=ymNow();save(false);render();toast('Dane wyczyszczone')},0)})},
 };
 /* Wczytywanie pliku: porównuje znaczniki czasu, żeby starszy plik nie nadpisał nowszych danych przez pomyłkę. */
 function askImport(text){
@@ -1562,10 +1670,11 @@ $('#imp').addEventListener('change',async e=>{
   const f=e.target.files[0];e.target.value='';if(!f)return;askImport(await f.text());
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>render());
-addEventListener('storage',e=>{if(e.key===KEY&&e.newValue){try{S=migrate(JSON.parse(e.newValue));render()}catch(x){}}});
+addEventListener('storage',e=>{if(e.key===KEY&&e.newValue){try{S=migrate(JSON.parse(e.newValue));render()}catch(x){}}
+  if(e.key===CLOUD_KEY){try{CLOUD=JSON.parse(e.newValue||'null')}catch(x){}}});
 let _rz;addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(drawCharts,120)});
 if(window.visualViewport){const vv=visualViewport,kb=()=>document.documentElement.style.setProperty('--kb',Math.max(0,innerHeight-vv.height-vv.offsetTop)+'px');vv.addEventListener('resize',kb);vv.addEventListener('scroll',kb)}
-addEventListener('visibilitychange',()=>{if(!document.hidden&&U.ym!==ymNow()&&!S.expenses.length)U.ym=ymNow();if(!document.hidden)syncCheck()});
+addEventListener('visibilitychange',()=>{if(!document.hidden&&U.ym!==ymNow()&&!S.expenses.length)U.ym=ymNow();if(document.hidden){if(CL.timer)cloudSync()}else{cloudSync();syncCheck()}});
 
 /* ---------- render ---------- */
 const VIEWS={start:vStart,budzet:vBudzet,dlugi:vDlugi,cele:vCele,ustawienia:vUstawienia};
@@ -1581,7 +1690,7 @@ function render(){
 }
 const h0=location.hash.slice(1);if(VIEWS[h0])U.tab=h0;
 U.hint=U.tab==='start'; /* podpowiedź o wczytaniu pliku: tylko przy wejściu do aplikacji */
-save(false);render();syncCheck();
+save(false);render();cloudSync();syncCheck();
 </script>
 </body>
 </html>
