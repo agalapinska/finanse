@@ -900,16 +900,17 @@ function heroCard(b,ym){
   const bl=bilans(ym);
   if(b.limit<=0)return`<section class="card hero"><div class="h">Wydane ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</div><div class="big">${fmt(b.manual,0)}<small> zł</small></div>
     <div class="sub">Ustaw limity kategorii, a zobaczysz tutaj, ile zostało do końca miesiąca.</div><div class="btns"><button class="btn sm primary" data-act="tab" data-tab="budzet">Ustaw budżet</button></div></section>`;
-  /* Główna liczba: wpływy z miesiąca minus raty, koszty stałe, słoik, odłożone i CAŁY budżet zmienny (limity liczone na maksa). */
+  /* Główna liczba: wpływy z miesiąca minus raty, koszty stałe, słoik i CAŁY budżet zmienny (limity liczone na maksa).
+     Wpłaty na poduszkę i nadpłaty długów celowo NIE wchodzą do rachunku — odkłada się to, co tu zostaje. */
   const inc=income(ym),inYM=e=>e.date.slice(0,7)===ym,j=S.goals.jar;
   const jar=Math.max(bl.jar,sum(S.goalEvents.filter(e=>e.goal==='jar'&&inYM(e)),e=>e.amount));
   const saved=r2(sum(S.debtEvents.filter(e=>e.kind==='nadplata'&&inYM(e)),e=>e.amount)+sum(S.goalEvents.filter(e=>e.goal==='cushion'&&inYM(e)),e=>e.amount));
-  const fixed=b.fixed+b.res,varMax=sum(b.cats,c=>Math.max(c.varLimit,c.manual)),free=r2(inc.total-bl.raty-fixed-jar-saved-varMax);
+  const fixed=b.fixed+b.res,varMax=sum(b.cats,c=>Math.max(c.varLimit,c.manual)),free=r2(inc.total-bl.raty-fixed-jar-varMax);
   const row=(l,v,sub)=>`<div class="kv"><span>${l}${sub?`<small style="display:block">${sub}</small>`:''}</span><span class="am num">${v}</span></div>`;
   return`<section class="card hero ${free<0?'neg':''}">
     <div class="h"><span>${free<0?'Brakuje':'Zostaje'} ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</span>${st==='warn'?'<span class="badge warn">szybsze tempo</span>':''}</div>
     <div class="big">${fmt(Math.abs(free),0)}<small> zł</small></div>
-    <div class="sub">${free<0?'Tyle zabraknie, jeśli wydasz cały zaplanowany budżet.':'Po ratach, kosztach stałych i całym zaplanowanym budżecie — nawet jeśli wydasz wszystkie limity.'}</div>
+    <div class="sub">${free<0?'Tyle zabraknie, jeśli wydasz cały zaplanowany budżet.':'Tyle możesz odłożyć: po ratach, kosztach stałych i całym zaplanowanym budżecie.'}</div>
     <div class="bar lg ${st}"><i style="width:${pct*100}%"></i>${pace!=null?`<b style="left:${pace*100}%" title="Dzisiejszy dzień miesiąca"></b>`:''}</div>
     <div class="meta">${b.left<0?`<span style="color:var(--danger);font-weight:600">Limity przekroczone o ${zl(-b.left)}</span>`:`W limitach do wydania: <strong>${zl(b.left)}</strong> z ${zl(b.varLimit)}${cur&&b.left>0?` · ${zl(b.left/dl,0)} dziennie przez ${dl} ${plural(dl,'dzień','dni','dni')}`:''}`}</div>
     <details class="hist" data-open="hero" ${U.open.has('hero')?'open':''}><summary>Jak to policzone</summary>
@@ -917,9 +918,9 @@ function heroCard(b,ym){
       ${row('Raty','−'+zl(bl.raty))}
       ${row('Koszty stałe i rezerwy','−'+zl(fixed))}
       ${jar>0?row('Słoik','−'+zl(jar),esc(j.name)):''}
-      ${Math.abs(saved)>0.005?row('Nadpłaty i poduszka',(saved>0?'−':'+')+zl(Math.abs(saved))):''}
       ${row('Budżet zmienny — cały','−'+zl(varMax),`wydane ${zl(b.manual)}${varMax>b.varLimit+0.005?` · ponad limity ${zl(varMax-b.varLimit)}`:''}`)}
       <div class="kv total"><span>${free<0?'Brakuje':'Zostaje'}</span><span class="am num">${zl(free)}</span></div>
+      ${saved>0.005?`<div class="meta">Poza rachunkiem: w tym miesiącu odłożone lub nadpłacone ${zl(saved)}.</div>`:''}
     </details>
   </section>`;
 }
