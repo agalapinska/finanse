@@ -708,7 +708,7 @@ function applyOps(ops){
   return ops.length;
 }
 async function syncCheck(manual){
-  if(!DEV||!syncOK()||SY.busy||$('#sheet').open)return;
+  if(!DEV||!syncOK()||SY.busy||$('#sheet').open||(!manual&&typing()))return;
   if(CL.busy){setTimeout(()=>syncCheck(manual),500);return}
   SY.busy=true;let n=0,snap=null;const notes=[];
   const get=async u=>{const r=await fetch(`${u}?t=${Date.now()}`,{cache:'no-store'});if(!r.ok)throw new Error('brak połączenia z '+u);return r.json()};
@@ -772,7 +772,9 @@ async function cloudKeyFrom(pass,repo){
   return b64e(new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},k,256)));
 }
 const cloudAes=()=>crypto.subtle.importKey('raw',unb64(CLOUD.key),'AES-GCM',false,['encrypt','decrypt']);
-const cloudHead=()=>({Authorization:'Bearer '+CLOUD.token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});
+const cloudHead=()=>({Authorization:'Bearer '+CLOUD.token,Accept:'application/vnd.github+json'}); /* tylko nagłówki, które API GitHuba dopuszcza z przeglądarki */
+/* Gdy ktoś właśnie pisze w polu, nie podmieniamy mu widoku — pobranie zmian poczeka do następnego sprawdzenia. */
+const typing=()=>{const a=document.activeElement;return!!a&&(a.tagName==='TEXTAREA'||a.tagName==='SELECT'||a.tagName==='INPUT'&&!['checkbox','range','file'].includes(a.type))};
 const cloudApi=(method,body)=>fetch(`https://api.github.com/repos/${CLOUD.repo}/contents/dane.json${body?'':'?t='+Date.now()}`,{method,cache:'no-store',headers:cloudHead(),body:body?JSON.stringify(body):undefined});
 const cloudDeny=r=>{if(r.status===401)throw new Error('token jest nieważny lub wygasł');if(r.status===403||r.status===404)throw new Error('brak dostępu — sprawdź nazwę repozytorium i uprawnienia tokenu');if(!r.ok)throw new Error('GitHub odpowiedział błędem '+r.status)};
 async function cloudPush(sha){
@@ -803,7 +805,7 @@ async function cloudSync(manual){
   if(!CLOUD||!syncOK())return;
   if(CL.busy||SY.busy){clearTimeout(CL.timer);CL.timer=setTimeout(()=>cloudSync(manual),500);return}
   if($('#sheet').open)return;
-  CL.busy=true;clearTimeout(CL.timer);CL.timer=0;let got=false,retry=false;
+  CL.busy=true;clearTimeout(CL.timer);CL.timer=0;let got=false,retry=false,wait=false;const calm=manual||!typing();
   try{
     const r=await cloudApi('GET');let R=null,sha=null;
     if(r.status!==404){
@@ -816,15 +818,15 @@ async function cloudSync(manual){
     const loc=S.updatedAt||0,base=CLOUD.base||0,rem=R?R.updatedAt||0:0,dirty=loc!==base,fresh=!!R&&rem!==base;
     if(!R){if(loc)await cloudPush(null)}
     else if(rem===loc){if(dirty){CLOUD.base=loc;cloudStore()}}
-    else if(fresh&&dirty)cloudConflict(R);
-    else if(fresh){cloudAdopt(R);got=true}
+    else if(fresh&&dirty){if(calm)cloudConflict(R);else wait=true}
+    else if(fresh){if(calm){cloudAdopt(R);got=true}else wait=true}
     else if(dirty)await cloudPush(sha);
     retry=CL.again>0;CL.err='';
   }catch(e){CL.err=String(e&&e.message||e);CL.again=0}
   CL.at=Date.now();CL.busy=false;
-  if(retry||cloudDirty()&&!CL.err&&!$('#sheet').open)cloudSoon(retry?300:1500);
+  if(retry||cloudDirty()&&!CL.err&&!wait&&!$('#sheet').open)cloudSoon(retry?300:1500);
   if(got){toast('Pobrano zmiany z innego urządzenia');syncCheck()}
-  else if(U.tab==='ustawienia'&&!$('#sheet').open)render();
+  else if(U.tab==='ustawienia'&&!$('#sheet').open&&!typing())render();
   if(manual&&!got&&!$('#sheet').open)toast(CL.err?'Synchronizacja nie powiodła się':cloudDirty()?'Wysyłam zmiany…':'Dane są zsynchronizowane');
 }
 function cloudSoon(ms){if(!CLOUD)return;clearTimeout(CL.timer);CL.timer=setTimeout(()=>cloudSync(),ms||1500)}
@@ -903,6 +905,30 @@ function heroCard(b,ym){
     <div class="bar lg"><i style="width:${pct*100}%"></i>${pace!=null?`<b style="left:${pace*100}%" title="Dzisiejszy dzień miesiąca"></b>`:''}</div>
     <div class="sub">Wydane ${zl(b.manual)} z ${zl(b.varLimit)} zmiennych${cur&&b.left>0?` · <strong>${zl(b.left/dl,0)} dziennie</strong> przez ${dl} ${plural(dl,'dzień','dni','dni')}`:''}</div>
     <div class="meta">Koszty stałe (${zl(b.fixed+b.res)}) i raty (${zl(bl.raty)}) są już odliczone. <button class="link" data-act="tab" data-tab="budzet">Bilans miesiąca: ${signed(bl.net)}</button></div>
+  </section>`;
+}
+/* Pieniądze w skali miesiąca: wszystkie wpływy minus to, co obowiązkowe, odłożone i już wydane. */
+function moneyCard(b,ym){
+  const inc=income(ym);if(inc.total<=0)return'';
+  const cur=ym===ymNow(),raty=ratySum(ym),j=S.goals.jar,inYM=e=>e.date.slice(0,7)===ym;
+  const jar=Math.max(bilans(ym).jar,sum(S.goalEvents.filter(e=>e.goal==='jar'&&inYM(e)),e=>e.amount));
+  const saved=r2(sum(S.debtEvents.filter(e=>e.kind==='nadplata'&&inYM(e)),e=>e.amount)+sum(S.goalEvents.filter(e=>e.goal==='cushion'&&inYM(e)),e=>e.amount));
+  const fixed=b.fixed+b.res,left=r2(inc.total-raty-fixed-jar-saved-b.manual),plan=Math.max(0,r2(b.varLimit-b.manual));
+  const row=(l,v,sub)=>`<div class="kv"><span>${l}${sub?`<small style="display:block">${sub}</small>`:''}</span><span class="am num">${v}</span></div>`;
+  return`<section class="card">
+    <div class="h"><span>Pieniądze ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</span></div>
+    <div class="cs"><span class="mid num" ${left<0?'style="color:var(--danger)"':''}>${zl(left)}</span><small>po opłatach i wydatkach</small></div>
+    <div style="margin-top:10px">
+      ${row('Wpływy','+'+zl(inc.total),inc.extra>0?`stałe ${zl(inc.base,0)} + nadwyżki ${zl(inc.extra,0)}`:'')}
+      ${row('Raty','−'+zl(raty))}
+      ${row('Koszty stałe i rezerwy','−'+zl(fixed))}
+      ${jar>0?row('Słoik','−'+zl(jar),esc(j.name)):''}
+      ${Math.abs(saved)>0.005?row('Nadpłaty i poduszka',(saved>0?'−':'+')+zl(Math.abs(saved))):''}
+      ${row(cur?'Wydane do dziś':'Wydane','−'+zl(b.manual))}
+      <div class="kv total"><span>${left<0?'Brakuje':'Zostaje'}</span><span class="am num">${zl(left)}</span></div>
+    </div>
+    ${b.varLimit>0&&cur?plan>left+0.005?`<div class="note warn">W limitach na resztę miesiąca masz jeszcze ${zl(plan,0)} — to o ${zl(plan-left,0)} więcej, niż zostaje z wpływów.</div>`
+      :`<div class="meta">Z tego w limitach na resztę miesiąca: ${zl(plan,0)}. Poza planem zostaje ${zl(left-plan,0)}.</div>`:''}
   </section>`;
 }
 function targetCard(){
@@ -1022,7 +1048,7 @@ function setupCard(){
 function vStart(){
   const ym=U.ym,b=budget(ym);
   return`<div class="col" style="margin-bottom:12px">${roadStrip()}${phaseBanner()}</div>
-  <div class="cols"><div class="col">${setupCard()}${heroCard(b,ym)}<div class="duo">${targetCard()}${nextPayCard()}</div>${surplusBanner(ym)}${quickCard(b,ym)}</div>
+  <div class="cols"><div class="col">${setupCard()}${heroCard(b,ym)}${moneyCard(b,ym)}<div class="duo">${targetCard()}${nextPayCard()}</div>${surplusBanner(ym)}${quickCard(b,ym)}</div>
   <div class="col">${cardCard(ym)}${recentCard(ym)}${paymentsCard(ym)}</div></div>`;
 }
 
@@ -1691,6 +1717,8 @@ function render(){
 const h0=location.hash.slice(1);if(VIEWS[h0])U.tab=h0;
 U.hint=U.tab==='start'; /* podpowiedź o wczytaniu pliku: tylko przy wejściu do aplikacji */
 save(false);render();cloudSync();syncCheck();
+/* Na żywo: gdy aplikacja jest na ekranie, co 20 s sprawdza drugie urządzenie, a co minutę paczki od Claude. */
+let _tick=0;setInterval(()=>{if(document.hidden)return;cloudSync();if(++_tick%3===0)syncCheck()},20000);
 </script>
 </body>
 </html>
