@@ -137,7 +137,8 @@ strong{font-weight:650}
 .banner b{display:block}
 
 /* start */
-.hero.bad .big{color:var(--danger)}
+.hero.bad .big,.hero.neg .big{color:var(--danger)}
+.hero details.hist .kv{font-size:15px}
 .duo{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .duo .card{padding:16px 14px;display:flex;flex-direction:column}
 .duo .h{margin-bottom:6px;font-size:11px;letter-spacing:.03em;white-space:nowrap}
@@ -899,36 +900,27 @@ function heroCard(b,ym){
   const bl=bilans(ym);
   if(b.limit<=0)return`<section class="card hero"><div class="h">Wydane ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</div><div class="big">${fmt(b.manual,0)}<small> zł</small></div>
     <div class="sub">Ustaw limity kategorii, a zobaczysz tutaj, ile zostało do końca miesiąca.</div><div class="btns"><button class="btn sm primary" data-act="tab" data-tab="budzet">Ustaw budżet</button></div></section>`;
-  return`<section class="card hero ${st}">
-    <div class="h"><span>${b.left<0?'Przekroczono budżet':'Zostało'} ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</span>${st==='warn'?'<span class="badge warn">szybsze tempo</span>':''}</div>
-    <div class="big">${fmt(Math.abs(b.left),0)}<small> zł</small></div>
-    <div class="bar lg"><i style="width:${pct*100}%"></i>${pace!=null?`<b style="left:${pace*100}%" title="Dzisiejszy dzień miesiąca"></b>`:''}</div>
-    <div class="sub">Wydane ${zl(b.manual)} z ${zl(b.varLimit)} zmiennych${cur&&b.left>0?` · <strong>${zl(b.left/dl,0)} dziennie</strong> przez ${dl} ${plural(dl,'dzień','dni','dni')}`:''}</div>
-    <div class="meta">Koszty stałe (${zl(b.fixed+b.res)}) i raty (${zl(bl.raty)}) są już odliczone. <button class="link" data-act="tab" data-tab="budzet">${bl.net<0?`Plan na stałych wpływach: brakuje ${zl(-bl.net,0)}`:`Plan na stałych wpływach: zapas ${zl(bl.net,0)}`}</button></div>
-  </section>`;
-}
-/* Pieniądze w skali miesiąca: wszystkie wpływy minus to, co obowiązkowe, odłożone i już wydane. */
-function moneyCard(b,ym){
-  const inc=income(ym);if(inc.total<=0)return'';
-  const cur=ym===ymNow(),raty=ratySum(ym),j=S.goals.jar,inYM=e=>e.date.slice(0,7)===ym;
-  const jar=Math.max(bilans(ym).jar,sum(S.goalEvents.filter(e=>e.goal==='jar'&&inYM(e)),e=>e.amount));
+  /* Główna liczba: wpływy z miesiąca minus raty, koszty stałe, słoik, odłożone i CAŁY budżet zmienny (limity liczone na maksa). */
+  const inc=income(ym),inYM=e=>e.date.slice(0,7)===ym,j=S.goals.jar;
+  const jar=Math.max(bl.jar,sum(S.goalEvents.filter(e=>e.goal==='jar'&&inYM(e)),e=>e.amount));
   const saved=r2(sum(S.debtEvents.filter(e=>e.kind==='nadplata'&&inYM(e)),e=>e.amount)+sum(S.goalEvents.filter(e=>e.goal==='cushion'&&inYM(e)),e=>e.amount));
-  const fixed=b.fixed+b.res,left=r2(inc.total-raty-fixed-jar-saved-b.manual),plan=Math.max(0,r2(b.varLimit-b.manual));
+  const fixed=b.fixed+b.res,varMax=sum(b.cats,c=>Math.max(c.varLimit,c.manual)),free=r2(inc.total-bl.raty-fixed-jar-saved-varMax);
   const row=(l,v,sub)=>`<div class="kv"><span>${l}${sub?`<small style="display:block">${sub}</small>`:''}</span><span class="am num">${v}</span></div>`;
-  return`<section class="card">
-    <div class="h"><span>Pieniądze ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</span></div>
-    <div class="cs"><span class="mid num" ${left<0?'style="color:var(--danger)"':''}>${zl(left)}</span><small>po opłatach i wydatkach</small></div>
-    <div style="margin-top:10px">
+  return`<section class="card hero ${free<0?'neg':''}">
+    <div class="h"><span>${free<0?'Brakuje':'Zostaje'} ${cur?'w tym miesiącu':'— '+ymLabel(ym)}</span>${st==='warn'?'<span class="badge warn">szybsze tempo</span>':''}</div>
+    <div class="big">${fmt(Math.abs(free),0)}<small> zł</small></div>
+    <div class="sub">${free<0?'Tyle zabraknie, jeśli wydasz cały zaplanowany budżet.':'Po ratach, kosztach stałych i całym zaplanowanym budżecie — nawet jeśli wydasz wszystkie limity.'}</div>
+    <div class="bar lg ${st}"><i style="width:${pct*100}%"></i>${pace!=null?`<b style="left:${pace*100}%" title="Dzisiejszy dzień miesiąca"></b>`:''}</div>
+    <div class="meta">${b.left<0?`<span style="color:var(--danger);font-weight:600">Limity przekroczone o ${zl(-b.left)}</span>`:`W limitach do wydania: <strong>${zl(b.left)}</strong> z ${zl(b.varLimit)}${cur&&b.left>0?` · ${zl(b.left/dl,0)} dziennie przez ${dl} ${plural(dl,'dzień','dni','dni')}`:''}`}</div>
+    <details class="hist" data-open="hero" ${U.open.has('hero')?'open':''}><summary>Jak to policzone</summary>
       ${row('Wpływy','+'+zl(inc.total),inc.extra>0?`stałe ${zl(inc.base,0)} + nadwyżki ${zl(inc.extra,0)}`:'')}
-      ${row('Raty','−'+zl(raty))}
+      ${row('Raty','−'+zl(bl.raty))}
       ${row('Koszty stałe i rezerwy','−'+zl(fixed))}
       ${jar>0?row('Słoik','−'+zl(jar),esc(j.name)):''}
       ${Math.abs(saved)>0.005?row('Nadpłaty i poduszka',(saved>0?'−':'+')+zl(Math.abs(saved))):''}
-      ${row(cur?'Wydane do dziś':'Wydane','−'+zl(b.manual))}
-      <div class="kv total"><span>${left<0?'Brakuje':'Zostaje'}</span><span class="am num">${zl(left)}</span></div>
-    </div>
-    ${b.varLimit>0&&cur?plan>left+0.005?`<div class="note warn">W limitach na resztę miesiąca masz jeszcze ${zl(plan,0)} — to o ${zl(plan-left,0)} więcej, niż zostaje z wpływów.</div>`
-      :`<div class="meta">Z tego w limitach na resztę miesiąca: ${zl(plan,0)}. Poza planem zostaje ${zl(left-plan,0)}.</div>`:''}
+      ${row('Budżet zmienny — cały','−'+zl(varMax),`wydane ${zl(b.manual)}${varMax>b.varLimit+0.005?` · ponad limity ${zl(varMax-b.varLimit)}`:''}`)}
+      <div class="kv total"><span>${free<0?'Brakuje':'Zostaje'}</span><span class="am num">${zl(free)}</span></div>
+    </details>
   </section>`;
 }
 function targetCard(){
@@ -1048,7 +1040,7 @@ function setupCard(){
 function vStart(){
   const ym=U.ym,b=budget(ym);
   return`<div class="col" style="margin-bottom:12px">${roadStrip()}${phaseBanner()}</div>
-  <div class="cols"><div class="col">${setupCard()}${heroCard(b,ym)}${moneyCard(b,ym)}<div class="duo">${targetCard()}${nextPayCard()}</div>${surplusBanner(ym)}${quickCard(b,ym)}</div>
+  <div class="cols"><div class="col">${setupCard()}${heroCard(b,ym)}<div class="duo">${targetCard()}${nextPayCard()}</div>${surplusBanner(ym)}${quickCard(b,ym)}</div>
   <div class="col">${cardCard(ym)}${recentCard(ym)}${paymentsCard(ym)}</div></div>`;
 }
 
