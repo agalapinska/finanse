@@ -24,6 +24,12 @@ Tryb „płacę kartą i co miesiąc spłacam cały wyciąg” (`S.card`, `S.car
 - Stałe pozycje „kartą” liczą się od `card.since` (dzień włączenia trybu) i są wliczane z góry.
 - Wpis w `cardPays` z `full:true` zamyka wyciąg; bez niego to wcześniejsza spłata zmniejszająca kwotę do zapłaty.
 
+## Tabela miesiąca
+
+Budżet → „Pobierz tabelę miesiąca” zapisuje `finanse-RRRR-MM-tabela.csv` (średnik, przecinek dziesiętny, UTF-8 z BOM): każdy zakup, koszt stały, rezerwa, rata, nadpłata, wpłata i wpływ w osobnym wierszu, z pustymi kolumnami „Powtarzalne (tak/nie)” i „Uwagi” oraz `ID` wpisu.
+
+Rytm ustalony z użytkowniczką: co miesiąc poprawia tabelę w arkuszu i wgrywa ją w rozmowie. Cel analizy to wyłapanie powtarzalnych zakupów (np. chemia domowa), zaplanowanie ich z góry i rozłożenie kosztów w czasie. Poprawki do istniejących wpisów odsyłaj paczką po `ID`. Wgrana tabela to jawne dane — nie trafia do repozytorium.
+
 ## Synchronizacja urządzeń
 
 Dwukierunkowa, między urządzeniami użytkowniczki (`CLOUD`, `cloudSync()`). Cały stan `S` jest szyfrowany AES-GCM kluczem z hasła (PBKDF2) i zapisywany jako `dane.json` w jej **osobnym, prywatnym repozytorium** przez GitHub API. Token, klucz i znacznik `base` leżą w localStorage pod `finanse-domowe-v1-chmura`, poza plikiem z danymi.

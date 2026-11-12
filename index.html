@@ -1103,7 +1103,32 @@ function chartsCard(b,ym){
 function expensesCard(ym){
   const ex=monthExpenses(ym);let last='';
   return`<section class="card"><div class="h"><span>Wydatki — ${ymLabel(ym)}</span><small>${ex.length} ${plural(ex.length,'pozycja','pozycje','pozycji')} · ${zl(sum(ex,e=>e.amount))}</small></div>
-    ${ex.length?ex.map(e=>{const h=e.date!==last?`<div class="day-h">${dLabel(e.date)}</div>`:'';last=e.date;return h+expRow(e).replace('class="row"','class="row first"')}).join(''):'<div class="empty">Brak wydatków w tym miesiącu.</div>'}</section>`;
+    ${ex.length?ex.map(e=>{const h=e.date!==last?`<div class="day-h">${dLabel(e.date)}</div>`:'';last=e.date;return h+expRow(e).replace('class="row"','class="row first"')}).join(''):'<div class="empty">Brak wydatków w tym miesiącu.</div>'}
+    <div class="btns"><button class="btn sm ghost" data-act="exportMonth">Pobierz tabelę miesiąca</button></div>
+    <div class="meta">Plik CSV do arkusza: wszystkie zakupy, opłaty, raty, wpłaty i wpływy z tego miesiąca, z kolumnami na Twoje poprawki.</div></section>`;
+}
+/* Tabela miesiąca (CSV): każdy zakup, opłata, rata, wpłata i wpływ w osobnym wierszu — do poprawek w arkuszu. */
+function monthRows(ym){
+  const m=M(ym),rows=[],nm=id=>cat(id)?.name||'',dd=day=>day?`${ym}-${pad(Math.min(day,daysIn(ym)))}`:'',kk=c=>c?'karta kredytowa':'';
+  const add=(date,typ,kat,opis,kwota,plat,status,id)=>rows.push([date,typ,kat,opis,kwota,plat,status,'','',id]);
+  for(const e of S.expenses)if(e.date.slice(0,7)===ym)add(e.date,'Zakup',nm(e.cat),e.note||'',e.amount,kk(e.card),'zapłacone',e.id);
+  for(const it of S.items){
+    if(it.type==='fix')add(dd(it.day),'Koszt stały',nm(it.cat),it.name,m.fixed[it.id]??itemAmt(it,ym),kk(it.card),it.day?(m.paid&&m.paid[it.id]?'zapłacone':'do zapłaty'):'',it.id);
+    else if(it.type==='res')add('','Rezerwa (odkładane)',nm(it.cat),it.name,itemAmt(it,ym),'','',it.id);
+  }
+  for(const p of S.reservePays)if(p.ym===ym){const it=item(p.item);add(p.date,'Rachunek z rezerwy',it?nm(it.cat):'',it?it.name:'',p.amount,'','zapłacone',p.id)}
+  for(const p of payments(ym))if(p.key.startsWith('d:')){const id=p.key.slice(2),ev=rataEv(id,ym);add(ev?ev.date:dd(p.day),'Rata','Długi',debt(id)?.name||p.name,p.amount,'',p.paid?'zapłacone':'do zapłaty',ev?ev.id:id)}
+  for(const e of S.debtEvents)if(e.kind==='nadplata'&&e.date.slice(0,7)===ym)add(e.date,'Nadpłata długu','Długi',debt(e.debt)?.name||'',e.amount,'','zapłacone',e.id);
+  for(const e of S.goalEvents)if(e.date.slice(0,7)===ym)add(e.date,e.amount<0?'Wypłata z oszczędności':'Oszczędności',e.goal==='jar'?'Słoik':'Poduszka',e.note||(e.goal==='jar'?S.goals.jar.name:''),Math.abs(e.amount),'','',e.id);
+  for(const p of S.cardPays)if(p.date.slice(0,7)===ym)add(p.date,'Spłata karty','Karta kredytowa',`wyciąg z ${dLabel(cClose(p.cycle))}`,p.amount,'','zapłacone',p.id);
+  for(const r of income(ym).rows)add(dd(r.day),'Wpływ','Dochód stały',r.name,r.amount,'','',r.id);
+  for(const e of m.extras)add(e.date,'Wpływ','Nadwyżka',[e.src,e.note].filter(Boolean).join(' · '),e.amount,'','',e.id);
+  return rows.sort((a,b)=>(a[0]||'9999').localeCompare(b[0]||'9999'));
+}
+function monthCSV(ym){
+  const cell=v=>{if(typeof v==='number')return String(r2(v)).replace('.',',');v=String(v??'');if(/^[=+\-@]/.test(v))v="'"+v;return/[;"\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
+  const head=['Data','Typ','Kategoria','Opis','Kwota','Płatność','Status','Powtarzalne (tak/nie)','Uwagi','ID'];
+  return'\ufeff'+[head,...monthRows(ym)].map(r=>r.map(cell).join(';')).join('\r\n')+'\r\n';
 }
 function vBudzet(){
   const ym=U.ym,b=budget(ym);
@@ -1622,6 +1647,14 @@ const ACT={
     const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'application/json'}));
     a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);
     render();toast(`Zapisano plik ${name}`);
+  },
+  async exportMonth(){
+    const name=`finanse-${U.ym}-tabela.csv`,text=monthCSV(U.ym);let file=null;try{file=new File([text],name,{type:'text/csv'})}catch(e){}
+    if(file&&matchMedia('(pointer:coarse)').matches&&navigator.canShare?.({files:[file]})){
+      try{await navigator.share({files:[file],title:`Finanse — ${ymLabel(U.ym)}`});return}catch(e){if(e.name==='AbortError')return}
+    }
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'}));
+    a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);toast(`Zapisano plik ${name}`);
   },
   import(){$('#imp').click()},
   async copyJson(){try{const prev=S.settings.lastExport;S.settings.lastExport=Date.now();await navigator.clipboard.writeText(JSON.stringify(S)).catch(e=>{S.settings.lastExport=prev;throw e});save(false);render();toast('Dane skopiowane — wklej je na drugim urządzeniu')}catch(e){toast('Nie udało się skopiować — użyj zapisu do pliku')}},

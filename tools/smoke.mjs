@@ -32,7 +32,10 @@ await page.click('nav [data-tab=start]');await page.fill('#qAmt','20');await pag
 s=await S();ok(s.card.on&&s.expenses.length===2&&s.expenses[1].card===true,'tryb karty: wydatek oznaczony „kartą”');
 ok((await page.innerText('#view')).includes('Do odłożenia na spłatę'),'widget karty widoczny na Starcie');
 for(const t of['budzet','dlugi','cele','ustawienia','start']){await page.click(`nav [data-tab=${t}]`);await page.waitForTimeout(60)}
-await page.evaluate(()=>localStorage.clear());await page.reload();
+await page.click('nav [data-tab=budzet]');const [dl]=await Promise.all([page.waitForEvent('download'),page.click('[data-act=exportMonth]')]);
+const csv=await readFile(await dl.path(),'utf8');
+ok(csv.startsWith('\ufeffData;Typ;Kategoria;Opis;Kwota;')&&/;Zakup;Życie;;20;karta kredytowa;zapłacone;/.test(csv)&&/;Koszt stały;Dom;Czynsz;900;/.test(csv)&&/;Wpływ;Dochód stały;Pensja;5000;/.test(csv),'tabela miesiąca: zakupy, koszty stałe i wpływy w CSV');
+await page.evaluate(()=>{localStorage.clear();location.hash='start'});await page.reload();
 ok(/pierwsze kroki/i.test(await page.innerText('#view')),'pusta aplikacja startuje');
 ok(!errs.length,'konsola bez błędów'+(errs.length?': '+errs.join(' | '):''));
 await b.close();srv.close();process.exit(fail?1:0);
