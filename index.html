@@ -416,20 +416,24 @@ function defaults(){
     categories:[{id:'zycie',name:'Życie codzienne'},{id:'mieszkanie',name:'Mieszkanie'},{id:'transport',name:'Transport'},{id:'zdrowie',name:'Zdrowie'},{id:'subs',name:'Subskrypcje'},{id:'inne',name:'Inne'}],
     items:[],expenses:[],months:{},debtEvents:[],goalEvents:[],reservePays:[],history:{},
     goals:{cushion:{cash:0,account:0},jar:{name:'Cel dodatkowy',target:0,balance:0,monthly:0,day:null},assets:[]},
+    card:{on:false,name:'',target:0,benefit:0,benefitName:'',period:'month',close:null,due:null,limit:null,debt:'',since:'',quick:true},cardPays:[],
+    sync:{last:''},
   };
 }
 function migrate(s){
   const d=defaults(),st=s.settings=s.settings||{};
   if(!Array.isArray(st.incomes))delete st.incomes;
   s.settings=Object.assign({},d.settings,st);
-  for(const k of['debts','categories','items','expenses','debtEvents','goalEvents','reservePays'])if(!Array.isArray(s[k]))s[k]=d[k];
+  for(const k of['debts','categories','items','expenses','debtEvents','goalEvents','reservePays','cardPays'])if(!Array.isArray(s[k]))s[k]=d[k];
+  for(const k of['card','sync'])s[k]=Object.assign({},d[k],s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k])?s[k]:null);
   s.months=s.months||{};s.history=s.history||{};s.createdYM=s.createdYM||ymNow();
   s.goals=s.goals||{};for(const k of['cushion','jar'])s.goals[k]=Object.assign({},d.goals[k],s.goals[k]);
   if(!Array.isArray(s.goals.assets))s.goals.assets=[];
   s.v=2;if(s.updatedAt===undefined)s.updatedAt=null;
   return s;
 }
-function load(){try{const r=localStorage.getItem(KEY);if(r)return migrate(JSON.parse(r))}catch(e){console.warn(e)}return defaults()}
+/* Gdyby zapisane dane nie dały się odczytać, ich surowa kopia zostaje pod kluczem „-kopia”, zanim autozapis je nadpisze. */
+function load(){let r=null;try{r=localStorage.getItem(KEY);if(r)return migrate(JSON.parse(r))}catch(e){console.warn(e);try{if(r)localStorage.setItem(KEY+'-kopia',r)}catch(x){}}return defaults()}
 let S=load();
 let STORE_OK=true;try{localStorage.setItem(KEY+'-t','1');localStorage.removeItem(KEY+'-t')}catch(e){STORE_OK=false}
 /* Autozapis: każda zmiana ląduje w localStorage tej przeglądarki. touch=false nie zmienia znacznika „ostatnia zmiana”. */
@@ -487,6 +491,43 @@ function surplusInfo(ym){
 function resBalance(it){
   const n=Math.max(0,ymDiff(it.startYM||S.createdYM,ymNow())+1);
   return r2((it.startBalance||0)+n*it.amount-sum(S.reservePays.filter(p=>p.item===it.id),p=>p.amount));
+}
+
+/* ---------- model: karta kredytowa (zakupy kartą, co miesiąc spłata całego wyciągu) ----------
+   Cykl wyciągu nosi nazwę miesiąca, w którym się zamyka. Zakup kartą liczy się do budżetu w dniu zakupu;
+   spłata wyciągu to już tylko przelew, nie nowy wydatek. */
+const cClose=ym=>`${ym}-${pad(Math.min(S.card.close||31,daysIn(ym)))}`;
+const cCycle=date=>{const ym=date.slice(0,7);return date<=cClose(ym)?ym:ymAdd(ym,1)};
+const cStart=ym=>{const p=ymAdd(ym,-1),c=+cClose(p).slice(8);return c>=daysIn(p)?ym+'-01':`${p}-${pad(c+1)}`};
+function cDue(ym){
+  const D=S.card.due;if(!D)return null;
+  const a=`${ym}-${pad(Math.min(D,daysIn(ym)))}`;if(a>cClose(ym))return a;
+  const n=ymAdd(ym,1);return`${n}-${pad(Math.min(D,daysIn(n)))}`;
+}
+const cPayYM=ym=>(cDue(ym)||cStart(ymAdd(ym,1))).slice(0,7);
+const cPeriod=ym=>S.card.period==='cycle'?[cStart(ym),cClose(ym)]:[ym+'-01',`${ym}-${pad(daysIn(ym))}`];
+/* Obciążenia karty w przedziale dat: wydatki oznaczone „kartą” + stałe pozycje „kartą” (od dnia włączenia trybu, wliczane z góry). */
+function cardSpend(from,to){
+  let man=0,fix=0;const c=S.card;
+  for(const e of S.expenses)if(e.card&&e.date>=from&&e.date<=to)man+=e.amount;
+  if(c.since){const a=from>c.since?from:c.since;
+    for(let ym=a.slice(0,7);ym<=to.slice(0,7);ym=ymAdd(ym,1))for(const it of S.items){
+      if(!it.card||it.type!=='fix')continue;
+      const d=`${ym}-${pad(Math.min(it.day||1,daysIn(ym)))}`;
+      if(d>=a&&d<=to)fix+=S.months[ym]?.fixed?.[it.id]??itemAmt(it,ym);
+    }}
+  return{man:r2(man),fix:r2(fix),total:r2(man+fix)};
+}
+function cardPlan(ym){let fix=0,vr=0;for(const it of S.items)if(it.card){if(it.type==='fix')fix+=itemAmt(it,ym);else if(it.type==='var')vr+=itemAmt(it,ym)}return{fix,var:vr,total:fix+vr}}
+function cardCycle(ym){
+  const pays=S.cardPays.filter(p=>p.cycle===ym),full=pays.find(p=>p.full),spent=cardSpend(cStart(ym),cClose(ym)).total,paid=r2(sum(pays,p=>p.amount));
+  return{ym,spent,paid,full,due:full?0:Math.max(0,r2(spent-paid)),close:cClose(ym),dueDate:cDue(ym),closed:cClose(ym)<today()};
+}
+function cardState(){
+  const td=today(),cur=cCycle(td),open=cardCycle(cur),due=[];
+  for(let i=12;i>=1;i--){const c=cardCycle(ymAdd(cur,-i));if(c.due>0.005)due.push(Object.assign(c,{late:!!c.dueDate&&c.dueDate<td}))}
+  const hold=r2(open.due+sum(due,c=>c.due)),d=debt(S.card.debt);
+  return{cur,open,due,hold,debt:d,free:S.card.limit>0?r2(S.card.limit-(d?d.balance:0)-hold):null};
 }
 
 /* ---------- model: długi ---------- */
@@ -578,6 +619,10 @@ function payments(ym){
   }
   const j=S.goals.jar,jev=S.goalEvents.find(e=>e.goal==='jar'&&e.auto&&e.ym===ym);
   if(j.monthly>0&&(j.balance<j.target||jev))out.push({key:'jar:x',name:'Wpłata: '+j.name,amount:jev?jev.amount:j.monthly,day:j.day,paid:!!jev});
+  if(S.card.on||S.cardPays.length)for(const cy of[ymAdd(ym,-1),ym]){
+    if(cPayYM(cy)!==ym)continue;const c=cardCycle(cy);if(c.spent<=0&&c.paid<=0)continue;
+    out.push({key:'c:'+cy,name:`Spłata karty — wyciąg z ${dLabel(c.close)}`,amount:c.full?c.full.amount:c.due>0?c.due:c.paid,day:c.dueDate?+c.dueDate.slice(8):null,paid:!!c.full||(c.closed&&c.due<=0.005)});
+  }
   for(const r of income(ym).rows)if(r.day&&r.amount>0)out.push({key:'in:'+r.id,name:'Wpływ: '+r.name,amount:r.amount,day:r.day,inflow:true});
   const now=ymNow(),td=+today().slice(8);
   for(const p of out){
@@ -596,11 +641,118 @@ function togglePay(key,ym){
   else if(k==='r'){const it=item(id),i=S.reservePays.findIndex(x=>x.item===id&&x.ym===ym);
     if(i>=0){S.reservePays.splice(i,1);it.nextDue=ym}
     else{S.reservePays.push({id:uid(),item:id,ym,date,amount:p.amount});if(validYM(it.nextDue))it.nextDue=ymAdd(it.nextDue,it.period||12)}}
+  else if(k==='c'){const c=cardCycle(id);
+    if(c.full)S.cardPays=S.cardPays.filter(x=>x!==c.full);
+    else if(!c.closed){setTimeout(()=>toast(`Ten wyciąg zamyka się ${dLabel(c.close)} — wcześniejszą spłatę zapiszesz w karcie na Starcie`),60);return false}
+    else if(c.due>0.005)S.cardPays.push({id:uid(),cycle:id,date,amount:c.due,calc:c.due,full:true});
+    else return false}
 }
 function nextPayment(){
   const ps=payments(ymNow()).filter(p=>!p.inflow&&!p.paid);
   const late=ps.find(p=>p.late);if(late)return late;
   return ps.find(p=>p.day)||ps[0]||null;
+}
+
+/* ---------- synchronizacja: zaszyfrowane paczki zmian od Claude ----------
+   Repozytorium i strona są publiczne, więc paczka (sync/<nr>.json) jest szyfrowana AES-GCM, a jej klucz — kluczem
+   publicznym RSA każdego sparowanego urządzenia. Klucz prywatny nie opuszcza przeglądarki (osobny wpis localStorage,
+   poza plikiem z danymi). Paczka to lista operacji, nie cały stan — lokalne zmiany zostają nietknięte. */
+const SYNC_KEY=KEY+'-sync',SY={busy:false,at:null,err:''};
+let DEV=null;try{DEV=JSON.parse(localStorage.getItem(SYNC_KEY)||'null')}catch(e){}
+const syncOK=()=>!!(window.crypto&&crypto.subtle);
+const unb64=t=>Uint8Array.from(atob(t),c=>c.charCodeAt(0));
+const syncCode=()=>`finanse-klucz:${DEV.id}:${DEV.pub}`;
+const devSave=()=>{try{localStorage.setItem(SYNC_KEY,JSON.stringify(DEV))}catch(e){}};
+async function syncEnable(){
+  const kp=await crypto.subtle.generateKey({name:'RSA-OAEP',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['encrypt','decrypt']);
+  const pub=new Uint8Array(await crypto.subtle.exportKey('spki',kp.publicKey));let b='';for(const x of pub)b+=String.fromCharCode(x);
+  DEV={id:uid(),priv:await crypto.subtle.exportKey('jwk',kp.privateKey),pub:btoa(b),paired:false};devSave();
+}
+/* 'debts[revolut].payment' → miejsce w danych; [id] wskazuje element tablicy po jego id. */
+function syncPath(path){
+  const segs=String(path).split('.');let o=S;
+  if(segs[0]==='months'&&validYM(segs[1]))M(segs[1]);
+  for(let i=0;i<segs.length;i++){
+    const m=/^([^\[\]]+)(?:\[([^\[\]]+)\])?$/.exec(segs[i]),last=i===segs.length-1;
+    if(!m||['__proto__','constructor','prototype'].includes(m[1]))throw new Error('zła ścieżka: '+path);
+    if(m[2]!=null){
+      const arr=o[m[1]];if(!Array.isArray(arr))throw new Error('to nie lista: '+path);
+      const el=arr.find(x=>x&&x.id===m[2]);if(last)return{arr,el,id:m[2]};
+      if(!el)throw new Error('brak elementu: '+segs[i]);o=el;
+    }else{
+      if(last)return{obj:o,key:m[1]};
+      if(o[m[1]]==null||typeof o[m[1]]!=='object')o[m[1]]={};o=o[m[1]];
+    }
+  }
+}
+function applyOps(ops){
+  for(const o of ops){
+    if(o.op==='set'){const t=syncPath(o.path);if(!t.arr)t.obj[t.key]=o.value;else if(t.el)Object.assign(t.el,o.value);else t.arr.push(Object.assign({},o.value,{id:t.id}))}
+    else if(o.op==='upsert'){
+      if(!o.value||!o.value.id)throw new Error('upsert bez id');
+      if(o.path==='expenses'&&o.value.ts==null)o.value.ts=Date.now();
+      const t=syncPath(`${o.path}[${o.value.id}]`);t.el?Object.assign(t.el,o.value):t.arr.push(o.value);
+    }
+    else if(o.op==='remove'){const t=syncPath(o.path);if(!t.arr)delete t.obj[t.key];else if(t.el)t.arr.splice(t.arr.indexOf(t.el),1)}
+    else if(o.op==='debtEvent'){
+      if(o.del)delDebtEvent(o.id);
+      else if(!S.debtEvents.some(e=>e.id===o.id)){const d=debt(o.debt);if(!d)throw new Error('brak długu: '+o.debt);addDebtEvent(d,o.amount,o.kind||'nadplata',o.date,o.ym).id=o.id}
+    }
+    else if(o.op==='goalEvent'){
+      if(o.del)delGoalEvent(o.id);
+      else if(!S.goalEvents.some(e=>e.id===o.id))addGoalEvent(o.goal==='jar'?'jar':'cushion',o.amount,o.date,o.note,o.auto?{auto:true,ym:o.ym||o.date.slice(0,7)}:null).id=o.id;
+    }
+    else throw new Error('nieznana operacja: '+o.op);
+  }
+  return ops.length;
+}
+async function syncCheck(manual){
+  if(!DEV||!syncOK()||SY.busy||$('#sheet').open)return;
+  SY.busy=true;let n=0,snap=null;const notes=[];
+  const get=async u=>{const r=await fetch(`${u}?t=${Date.now()}`,{cache:'no-store'});if(!r.ok)throw new Error('brak połączenia z '+u);return r.json()};
+  try{
+    const ix=await get('sync/index.json'),was=DEV.paired;
+    DEV.paired=!!(ix.devices&&ix.devices[DEV.id]);if(was!==DEV.paired)devSave();
+    const todo=(ix.updates||[]).filter(id=>id>(S.sync.last||'')).sort();
+    if(todo.length){
+      const priv=await crypto.subtle.importKey('jwk',DEV.priv,{name:'RSA-OAEP',hash:'SHA-256'},false,['decrypt']);
+      snap=JSON.stringify(S);
+      for(const id of todo){
+        const u=await get(`sync/${id}.json`),wk=u.keys&&u.keys[DEV.id];
+        if(wk){
+          const raw=await crypto.subtle.decrypt({name:'RSA-OAEP'},priv,unb64(wk));
+          const key=await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt']);
+          const body=JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(u.iv)},key,unb64(u.ct))));
+          const before=JSON.stringify(S);
+          try{n+=applyOps(body.ops||[]);if(body.note)notes.push(body.note)}
+          catch(e){S=migrate(JSON.parse(before));throw new Error(`paczka ${id}: ${e.message}`)}
+        }
+        S.sync.last=id;
+      }
+    }
+    SY.err='';
+  }catch(e){SY.err=String(e&&e.message||e)}
+  SY.at=Date.now();SY.busy=false;
+  if(n){
+    const last=S.sync.last;migrate(S);save();render();
+    toast(`Od Claude: ${esc(notes.join(' · ')||n+' '+plural(n,'zmiana','zmiany','zmian'))}`,{label:'Cofnij',fn(){S=migrate(JSON.parse(snap));S.sync.last=last;save();render()}});
+  }else{
+    if(snap&&JSON.stringify(S)!==snap)save(false);
+    if(U.tab==='ustawienia'&&!$('#sheet').open)render();
+    if(manual)toast(SY.err?'Nie udało się sprawdzić — spróbuj za chwilę':DEV.paired?'Brak nowych zmian od Claude':'To urządzenie czeka jeszcze na sparowanie');
+  }
+}
+function syncCard(){
+  if(!syncOK())return'';
+  const head=b=>`<section class="card"><div class="h"><span>Zmiany od Claude</span>${b||''}</div>`;
+  if(!DEV)return`${head()}<p class="sub" style="margin-top:0">Claude może dosyłać zmiany — np. wydatki podane w rozmowie — prosto do tej aplikacji. Każda paczka jest szyfrowana kluczem tego urządzenia i tylko ono ją odczyta; w publicznym repozytorium nie ma jawnych danych.</p>
+    <div class="btns"><button class="btn sm primary" data-act="syncOn">Włącz na tym urządzeniu</button></div></section>`;
+  return`${head(DEV.paired?'<span class="badge soft">połączone</span>':'<span class="badge warn">czeka na sparowanie</span>')}
+    ${DEV.paired?'':`<p class="sub" style="margin-top:0">Skopiuj kod tego urządzenia i wklej go w rozmowie z Claude. To klucz publiczny — służy tylko do szyfrowania, niczego nie odblokowuje.</p>`}
+    <div class="kv"><span>Ostatnie sprawdzenie</span><span class="am">${tsLabel(SY.at)}</span></div>
+    <div class="kv"><span>Ostatnia paczka</span><span class="am">${S.sync.last?'nr '+(+S.sync.last):'—'}</span></div>
+    ${SY.err?`<div class="note warn">Ostatnie sprawdzenie nie powiodło się (${esc(SY.err)}).</div>`:''}
+    <div class="btns">${DEV.paired?`<button class="btn sm primary" data-act="syncNow">Sprawdź teraz</button><button class="btn sm ghost" data-act="syncCopy">Kod urządzenia</button>`:`<button class="btn sm primary" data-act="syncCopy">Kopiuj kod urządzenia</button><button class="btn sm ghost" data-act="syncNow">Sprawdź teraz</button>`}<button class="btn sm del" data-act="syncOff">Wyłącz</button></div></section>`;
 }
 
 /* ---------- widok: nagłówek, nawigacja ---------- */
@@ -699,6 +851,7 @@ function quickCard(b,ym){
     <div class="amt"><input id="qAmt" data-q="amt" inputmode="decimal" enterkeyhint="done" autocomplete="off" placeholder="0" aria-label="Kwota wydatku" value="${esc(q.amt)}"><span>zł</span></div>
     <div class="qrow"><input class="in" id="qNote" data-q="note" placeholder="Notatka (opcjonalnie)" autocomplete="off" aria-label="Notatka" value="${esc(q.note)}">
       <input class="in" type="date" id="qDate" data-q="date" aria-label="Data" value="${date}"></div>
+    ${S.card.on?`<label class="tog" style="margin-top:8px"><input type="checkbox" data-change="qcard" ${S.card.quick?'checked':''}>Płacę kartą kredytową${S.card.name?` (${esc(S.card.name)})`:''}</label>`:''}
     <div class="qhint" id="qHint">Stuknij kategorię, żeby zapisać</div>
     <div class="chips">${cats.map(c=>{
       const over=c.limit>0&&c.left<0,p=c.varLimit>0?clamp(c.manual/c.varLimit,0,1):c.limit>0?1:0;
@@ -709,13 +862,47 @@ function quickCard(b,ym){
 }
 function expRow(e){
   const c=cat(e.cat);
-  return`<button class="row" data-act="expEdit" data-id="${e.id}"><span class="rt"><b>${esc(e.note||c?.name||'Wydatek')}</b><small>${esc(c?.name||'—')} · ${dLabel(e.date)}</small></span><span class="am num">${zl(e.amount)}</span></button>`;
+  return`<button class="row" data-act="expEdit" data-id="${e.id}"><span class="rt"><b>${esc(e.note||c?.name||'Wydatek')}</b><small>${esc(c?.name||'—')} · ${dLabel(e.date)}${e.card?' · kartą':''}</small></span><span class="am num">${zl(e.amount)}</span></button>`;
 }
 function monthExpenses(ym){return S.expenses.filter(e=>e.date.slice(0,7)===ym).sort((a,b)=>b.date.localeCompare(a.date)||b.ts-a.ts)}
 function recentCard(ym){
   const ex=monthExpenses(ym);
   return`<section class="card"><div class="h"><span>Ostatnie wydatki</span>${ex.length>6?`<button class="link" data-act="tab" data-tab="budzet">wszystkie (${ex.length})</button>`:''}</div>
     <div class="list">${ex.length?ex.slice(0,6).map(expRow).join(''):`<div class="empty">Jeszcze nic w tym miesiącu. Pierwszy wydatek dodasz powyżej — kwota i jedno stuknięcie.</div>`}</div></section>`;
+}
+function cardCard(ym){
+  const c=S.card;if(!c.on)return'';
+  const td=today(),cur=ym===ymNow(),st=cardState(),[a,b]=cPeriod(c.period==='cycle'&&cur?st.cur:ym);
+  const sp=cardSpend(a,b),t=c.target||0,hit=t>0&&sp.total>=t-0.005,pl=cardPlan(ym);
+  const pf=t>0?clamp(sp.fix/t,0,1):0,pm=t>0?clamp(sp.man/t,0,1-pf):0;
+  const rem=Math.max(0,pl.var-sp.man),fc=sp.total+rem,ben=`${c.benefitName?esc(c.benefitName):''}${c.benefit>0?`${c.benefitName?' · ':''}${zl(c.benefit)}/msc`:''}`;
+  const red='style="color:var(--danger);font-weight:600"',late=st.due.filter(x=>x.late),rate=st.debt?.rate||0;
+  const hist=[...S.cardPays].sort((x,y)=>y.date.localeCompare(x.date));
+  let thr='';
+  if(t>0&&hit)thr=`<div class="note">Próg zaliczony${ben?` — ${ben}`:''}. Od teraz pilnuj już tylko budżetu.</div>`;
+  else if(t>0&&cur)thr=fc>=t-0.005?`<div class="note">Z zaplanowanych wydatków dojdzie jeszcze ok. ${zl(rem,0)} — próg wyjdzie bez dodatkowych zakupów.</div>`
+    :`<div class="note warn">Z planu budżetu wyjdzie ok. ${zl(fc,0)} — do progu zabraknie ${zl(t-fc,0)}. Nie dobijaj zakupami${c.benefit>0?` (cała korzyść to ${zl(c.benefit)}/msc)`:''}: przenieś na kartę płatności, które i tak robisz. <button class="link" data-act="tab" data-tab="ustawienia">Oznacz pozycje „kartą”</button></div>`;
+  else if(t>0)thr=`<div class="note">Próg niezaliczony — zabrakło ${zl(t-sp.total,0)}.</div>`;
+  return`<section class="card">
+    <div class="h"><span>Karta kredytowa${c.name?' · '+esc(c.name):''}</span>${t>0?hit?'<span class="badge acc">próg zaliczony</span>':`<span class="badge">do progu ${zl(t-sp.total,0)}</span>`:''}</div>
+    <div class="cs"><span class="mid num">${zl(sp.total)}</span><small>${t>0?`z ${zl(t)} · `:''}do ${dLabel(b)}</small></div>
+    ${t>0?`<div class="bar lg"><i class="cm" style="width:${pf*100}%"></i><i style="left:${pf*100}%;width:${pm*100}%"></i></div>`:''}
+    <div class="meta">Zakupy kartą ${zl(sp.man)}${sp.fix>0?` · stałe opłaty kartą ${zl(sp.fix)} (wliczone z góry)`:''}</div>
+    ${thr}
+    ${cur?`<div style="margin-top:14px">
+      ${st.due.map(x=>`<div class="kv"><span>Wyciąg z ${dLabel(x.close)}${x.dueDate?`<small style="display:block" ${x.late?red:''}>${x.late?'po terminie:':'termin'} ${dLabel(x.dueDate)}</small>`:''}</span><span class="am num">${zl(x.due)}</span></div>`).join('')}
+      <div class="kv"><span>Bieżący wyciąg<small style="display:block">zamknięcie ${dLabel(st.open.close)}</small></span><span class="am num">${zl(st.open.due)}</span></div>
+      <div class="kv total"><span>Do odłożenia na spłatę</span><span class="am num">${zl(st.hold)}</span></div></div>
+    <div class="meta">To nie są wolne pieniądze: tyle musi czekać na koncie do dnia spłaty.${st.free!=null?` Wolny limit karty: ${zl(st.free,0)}.`:''}${st.debt&&st.debt.payment>0&&st.debt.balance>0?` Bank doliczy do wyciągu ratę ${zl(st.debt.payment)} (${esc(st.debt.name)}) — jest osobno w Długach.`:''}</div>
+    ${late.length?`<div class="note warn">Wyciąg po terminie — bank nalicza odsetki od niespłaconej kwoty${rate>0?` (ok. ${zl(sum(late,x=>x.due)*rate/1200,0)} za miesiąc)`:''}. Spłać go dziś.</div>`:''}
+    ${!c.due?`<div class="note warn">Brakuje dnia spłaty wyciągu. <button class="link" data-act="setCard">Ustaw go</button>, a termin trafi na listę płatności.</div>`:''}
+    ${st.free!=null&&t>0&&!hit&&st.free<t-sp.total?`<div class="note warn">Wolny limit nie pomieści reszty progu. Wcześniejsza spłata zwalnia limit jeszcze przed wyciągiem.</div>`:''}
+    <div class="btns">${st.due.length?`<button class="btn sm primary" data-act="cardPay" data-c="${st.due[0].ym}">Spłacono wyciąg</button>`:''}${st.open.due>0?`<button class="btn sm ghost" data-act="cardPay" data-c="${st.cur}">Wcześniejsza spłata</button>`:''}<button class="btn sm ghost" data-act="setCard">Ustawienia karty</button></div>
+    ${hist.length?`<details class="hist" data-open="cardh" ${U.open.has('cardh')?'open':''}><summary>Historia spłat (${hist.length})</summary>
+      ${hist.map(p=>{const df=p.full&&p.calc!=null?r2(p.amount-p.calc):0;
+        return`<div class="it"><span class="rt"><span>${p.full?'Cały wyciąg':'Wcześniejsza spłata'} · ${dLabel(p.date)} ${p.date.slice(0,4)}</span><small>wyciąg z ${dLabel(cClose(p.cycle))}${Math.abs(df)>0.005?` · ${zl(Math.abs(df))} ${df>0?'więcej':'mniej'} niż zapisane zakupy`:''}</small></span><span class="am num">${zl(p.amount)}</span>
+        <button class="ib" data-act="cardPayDel" data-id="${p.id}" aria-label="Usuń wpis">${ico('x',18)}</button></div>`}).join('')}</details>`:''}`:''}
+  </section>`;
 }
 function paymentsCard(ym){
   const ps=payments(ym),due=ps.filter(p=>!p.inflow),paid=due.filter(p=>p.paid),ms=MIES_S[+ym.slice(5)-1];
@@ -743,7 +930,7 @@ function vStart(){
   const ym=U.ym,b=budget(ym);
   return`<div class="col" style="margin-bottom:12px">${roadStrip()}${phaseBanner()}</div>
   <div class="cols"><div class="col">${setupCard()}${heroCard(b,ym)}<div class="duo">${targetCard()}${nextPayCard()}</div>${surplusBanner(ym)}${quickCard(b,ym)}</div>
-  <div class="col">${recentCard(ym)}${paymentsCard(ym)}</div></div>`;
+  <div class="col">${cardCard(ym)}${recentCard(ym)}${paymentsCard(ym)}</div></div>`;
 }
 
 /* ---------- widok: Budżet ---------- */
@@ -778,7 +965,7 @@ function budgetCard(b,ym){
       <div class="items">${c.rows.map(({it,plan,act})=>{
         const tp=it.type==='fix'?'stały':it.type==='res'?'rezerwa':'limit';
         const chg=it.nextAmount!=null&&validYM(it.nextFrom)&&ym<it.nextFrom?` → ${zl(it.nextAmount)} od ${ymGen(it.nextFrom)}`:'';
-        return`<div class="it"><button class="rt" data-act="${it.type==='fix'?'fixedEdit':'itemEdit'}" data-id="${it.id}"><span>${esc(it.name)} ${it.confirm?'<span class="badge warn">do potwierdzenia</span>':''}</span><small>${tp}${it.day?` · ${it.day}. dnia`:''}${chg}${it.note?' · '+esc(it.note):''}</small></button>
+        return`<div class="it"><button class="rt" data-act="${it.type==='fix'?'fixedEdit':'itemEdit'}" data-id="${it.id}"><span>${esc(it.name)} ${it.confirm?'<span class="badge warn">do potwierdzenia</span>':''}</span><small>${tp}${it.card?' · kartą':''}${it.day?` · ${it.day}. dnia`:''}${chg}${it.note?' · '+esc(it.note):''}</small></button>
           <span class="am num">${it.type==='fix'&&act!==plan?`${zl(act)}<small style="display:block">plan ${zl(plan)}</small>`:zl(plan)}</span>
           <button class="ib" data-act="itemEdit" data-id="${it.id}" aria-label="Edytuj pozycję ${esc(it.name)}">${ico('edit',18)}</button></div>`}).join('')}
         <div class="btns" style="margin-top:8px"><button class="btn sm ghost" data-act="itemAdd" data-cat="${c.id}">+ Pozycja</button></div></div></details>`}).join('')}
@@ -930,11 +1117,12 @@ function pending(){
     if(it.confirm)out.push({t:`${it.name}: kwota`,act:'itemEdit',id:it.id});
     if(it.type==='res'&&!validYM(it.nextDue))out.push({t:`${it.name}: termin najbliższego rachunku`,act:'itemEdit',id:it.id});
   }
+  if(S.card.on&&!S.card.due)out.push({t:'Karta kredytowa: dzień spłaty wyciągu',act:'setCard'});
   for(const a of S.goals.assets)if(a.value==null)out.push({t:`${a.name}: aktualna ${a.qty!=null?'wycena':'wartość'}`,act:'assetEdit',id:a.id});
   return out;
 }
 function vUstawienia(){
-  const st=S.settings,pd=pending(),c=S.goals.cushion,j=S.goals.jar;
+  const st=S.settings,pd=pending(),c=S.goals.cushion,j=S.goals.jar,cd=S.card;
   const dirty=S.updatedAt&&(!st.lastExport||S.updatedAt>st.lastExport),stale=dirty&&(!st.lastExport||Date.now()-st.lastExport>14*864e5);
   const srow=(act,t,sub,am,id)=>`<button class="srow" data-act="${act}" ${id?`data-id="${id}"`:''}><span class="rt"><b>${t}</b>${sub?`<small>${sub}</small>`:''}</span>${am?`<span class="am num">${am}</span>`:''}<span class="chev">${ico('r',18)}</span></button>`;
   return`<div class="cols"><div class="col">
@@ -946,6 +1134,7 @@ function vUstawienia(){
       ${!STORE_OK?'<div class="note warn">Ta przeglądarka nie pozwala na autozapis (tryb prywatny lub podgląd). Zapisuj dane do pliku przed zamknięciem.</div>':stale?'<div class="note warn">Masz zmiany, których nie ma w żadnym pliku. Zapisz plik — po wyczyszczeniu danych przeglądarki nie da się ich odzyskać.</div>':''}
       <div class="btns"><button class="btn primary sm" data-act="export">Zapisz do pliku</button><button class="btn sm" data-act="import">Wczytaj z pliku</button><button class="btn sm ghost" data-act="copyJson">Kopiuj dane</button><button class="btn sm ghost" data-act="pasteJson">Wklej dane</button></div>
       <div class="btns"><button class="btn sm del" data-act="reset">Wyczyść wszystkie dane</button></div></section>
+    ${syncCard()}
     ${pd.length?`<section class="card"><div class="h"><span>Do potwierdzenia</span><span class="badge warn">${pd.length}</span></div>
       ${pd.map(p=>`<button class="srow" data-act="${p.act}" ${p.id?`data-id="${p.id}"`:''}><span class="rt"><b>${esc(p.t)}</b></span><span class="chev">${ico('r',18)}</span></button>`).join('')}</section>`:''}
     <section class="card"><div class="h">Wygląd</div>
@@ -957,6 +1146,7 @@ function vUstawienia(){
       ${srow('setPlan','Plan i prognozy',`faza ${st.phase} · koszt miesiąca ${zl(st.monthCost)} · nadwyżka ${zl(st.avgSurplus)}/msc`)}
       ${srow('setCushion','Poduszka',`gotówka ${zl(c.cash)} · konto ${zl(c.account)}`)}
       ${srow('setJar','Słoik',j.target>0?`${esc(j.name)} · ${zl(j.balance)} z ${zl(j.target)}`:'nie ustawiono')}
+      ${srow('setCard','Karta kredytowa',cd.on?`${cd.name?esc(cd.name)+' · ':''}${cd.target>0?`próg ${zl(cd.target)} · `:''}${cd.due?`spłata ${cd.due}. dnia`:'<span style="color:var(--warn)">brak dnia spłaty</span>'}`:'wyłączona — zakupy kartą ze spłatą całego wyciągu')}
       <button class="srow" data-act="tab" data-tab="cele"><span class="rt"><b>Rezerwa 2. rzędu</b><small>${S.goals.assets.length?esc(S.goals.assets.map(a=>a.name).join(', ')):'dodasz w zakładce Cele'}</small></span><span class="chev">${ico('r',18)}</span></button></section>
   </div><div class="col">
     <section class="card"><div class="h"><span>Długi — kolejność lawiny</span><button class="link" data-act="debtAdd">+ dodaj</button></div>
@@ -965,7 +1155,7 @@ function vUstawienia(){
     <section class="card"><div class="h"><span>Budżet — kategorie i limity</span><button class="link" data-act="catAdd">+ kategoria</button></div>
       ${S.categories.map(ct=>{const its=S.items.filter(i=>i.cat===ct.id);
         return`<div class="sh"><span>${esc(ct.name)} · ${zl(sum(its,i=>i.amount))}</span><span><button class="link" data-act="catEdit" data-id="${ct.id}">nazwa</button> &nbsp; <button class="link" data-act="itemAdd" data-cat="${ct.id}">+ pozycja</button></span></div>
-        ${its.map(it=>srow('itemEdit',esc(it.name)+(it.confirm?' <span class="badge warn">do potwierdzenia</span>':''),`${it.type==='fix'?'stały':it.type==='res'?`rezerwa · rachunek ${zl(it.bill||0)} co ${it.period||12} msc`:'limit zmienny'}${it.day?` · ${it.day}. dnia`:''}`,zl(it.amount),it.id)).join('')}`}).join('')}</section>
+        ${its.map(it=>srow('itemEdit',esc(it.name)+(it.confirm?' <span class="badge warn">do potwierdzenia</span>':''),`${it.type==='fix'?'stały':it.type==='res'?`rezerwa · rachunek ${zl(it.bill||0)} co ${it.period||12} msc`:'limit zmienny'}${it.card?' · kartą':''}${it.day?` · ${it.day}. dnia`:''}`,zl(it.amount),it.id)).join('')}`}).join('')}</section>
   </div></div>`;
 }
 
@@ -1111,17 +1301,19 @@ const ACT={
     if(!(amt>0)){hint.textContent='Najpierw wpisz kwotę';hint.classList.add('err');const a=$('.amt');a.classList.remove('shake');void a.offsetWidth;a.classList.add('shake');$('#qAmt').focus();return}
     const date=$('#qDate').value||today();
     const e={id:uid(),ts:Date.now(),date,amount:amt,cat:d.cat,note:$('#qNote').value.trim()};
+    if(S.card.on&&S.card.quick)e.card=true;
     S.expenses.push(e);S.settings.lastCat=d.cat;U.q={amt:'',note:'',date:U.ym===ymNow()?null:date};
     document.activeElement?.blur();done();
     const c=budget(date.slice(0,7)).cats.find(c=>c.id===d.cat);
-    toast(`Zapisano ${zl(amt)} · ${esc(c.name)}${c.limit>0&&c.left<0?` — ponad limit o ${zl(-c.left,0)}`:''}`,{label:'Cofnij',fn(){S.expenses=S.expenses.filter(x=>x.id!==e.id);done()}});
+    toast(`Zapisano ${zl(amt)} · ${esc(c.name)}${e.card?' · kartą':''}${c.limit>0&&c.left<0?` — ponad limit o ${zl(-c.left,0)}`:''}`,{label:'Cofnij',fn(){S.expenses=S.expenses.filter(x=>x.id!==e.id);done()}});
   },
   expEdit(d){
     const e=S.expenses.find(x=>x.id===d.id);if(!e)return;
     sheet({title:'Edytuj wydatek',fields:[
       {k:'amount',label:'Kwota',type:'amount',value:e.amount,req:1,min:0.01},
       {k:'cat',label:'Kategoria',type:'select',opts:catOpts(),value:e.cat},
-      {k:'note',label:'Notatka',value:e.note},{k:'date',label:'Data',type:'date',value:e.date,req:1}],
+      {k:'note',label:'Notatka',value:e.note},{k:'date',label:'Data',type:'date',value:e.date,req:1},
+      ...(S.card.on||e.card?[{k:'card',label:'Zapłacone kartą kredytową',type:'check',value:!!e.card}]:[])],
       onSubmit(v){Object.assign(e,v)},onDelete(){S.expenses=S.expenses.filter(x=>x.id!==e.id);done();toast('Usunięto wydatek',{label:'Cofnij',fn(){S.expenses.push(e);done()}})}});
   },
   incomeEdit(){
@@ -1173,7 +1365,7 @@ const ACT={
       onSubmit(v){addDebtEvent(db,Math.min(v.amount,db.balance),'nadplata',v.date);setTimeout(()=>toast(`Nadpłata zapisana. Nowe saldo: ${zl(db.balance)}`),50)}});
   },
   evDel(d){confirmSheet('Usunąć wpis?','Saldo długu wróci do stanu sprzed tej wpłaty.','Usuń wpis',()=>delDebtEvent(d.id))},
-  payNext(d){togglePay(d.key,ymNow());done();toast('Oznaczono jako zapłacone',{label:'Cofnij',fn(){togglePay(d.key,ymNow());done()}})},
+  payNext(d){if(togglePay(d.key,ymNow())===false)return;done();toast('Oznaczono jako zapłacone',{label:'Cofnij',fn(){togglePay(d.key,ymNow());done()}})},
   debtAdd(){ACT.debtEdit({obj:{id:uid(),name:'',sub:'',balance:'',original:'',rate:'',payment:'',fees:0,day:null,end:'',phase:1,mode:'lawina',mortgage:false,confirm:[],note:''}})},
   debtMove(d){const i=S.debts.findIndex(x=>x.id===d.id),j=i+ +d.d;if(j<0||j>=S.debts.length)return;[S.debts[i],S.debts[j]]=[S.debts[j],S.debts[i]];done()},
   debtEdit(d){
@@ -1198,7 +1390,7 @@ const ACT={
         if(db.original==null||db.original<db.balance)db.original=db.balance;
         if(isNew)S.debts.push(db);
       },
-      onDelete:isNew?null:()=>{confirmSheet(`Usunąć „${esc(db.name)}”?`,'Znikną też zapisane raty i nadpłaty tego długu.','Usuń dług',()=>{S.debts=S.debts.filter(x=>x.id!==db.id);S.debtEvents=S.debtEvents.filter(e=>e.debt!==db.id)})}});
+      onDelete:isNew?null:()=>{confirmSheet(`Usunąć „${esc(db.name)}”?`,'Znikną też zapisane raty i nadpłaty tego długu.','Usuń dług',()=>{S.debts=S.debts.filter(x=>x.id!==db.id);S.debtEvents=S.debtEvents.filter(e=>e.debt!==db.id);if(S.card.debt===db.id)S.card.debt=''})}});
   },
   itemAdd(d){ACT.itemEdit({cat:d.cat})},
   itemEdit(d){
@@ -1215,6 +1407,7 @@ const ACT={
       {k:'startBalance',label:'Już odłożone',type:'amount',value:x.startBalance||0,half:1,showIf:'type=res'},
       {k:'nextAmount',label:'Nowa kwota (zmiana)',type:'amount',value:x.nextAmount??'',min:0,half:1,ph:'—',hint:'np. tańszy abonament'},
       {k:'nextFrom',label:'Od miesiąca',value:x.nextFrom||'',ph:'RRRR-MM',ym:1,half:1},
+      ...(S.card.on||x.card?[{k:'card',label:'Płacone kartą kredytową',type:'check',value:!!x.card,hint:'Koszt stały liczę do obrotu karty z góry; przy limicie zmiennym to tylko plan — liczą się wydatki oznaczone „kartą”.'}]:[]),
       {k:'note',label:'Uwagi',value:x.note}],
       onSubmit(v){
         v.period=+v.period;if(v.type==='res'&&!x.startYM)v.startYM=ymNow();
@@ -1265,6 +1458,35 @@ const ACT={
   setJar(){const j=S.goals.jar;sheet({title:'Słoik',fields:[{k:'name',label:'Nazwa celu',value:j.name,req:1},
     {k:'target',label:'Cel',type:'amount',value:j.target||'',req:1,min:1,half:1},{k:'balance',label:'Zebrano',type:'amount',value:j.balance,req:1,min:0,half:1},
     {k:'monthly',label:'Wpłata miesięczna',type:'amount',value:j.monthly,req:1,min:0,half:1},{k:'day',label:'Dzień wpłaty',type:'num',value:j.day??'',min:1,max:31,ph:'opcjonalnie',half:1}],onSubmit(v){Object.assign(j,v)}})},
+  setCard(){
+    const c=S.card,pl=cardPlan(ymNow());
+    sheet({title:'Karta kredytowa',desc:`Tryb dla karty, którą płacisz na co dzień i <strong>co miesiąc spłacasz cały wyciąg</strong>, żeby nie zapłacić odsetek. Aplikacja pilnuje progu wydatków, kwoty do odłożenia na spłatę i terminu. ${pl.total>0?`Pozycje budżetu oznaczone „kartą”: ${zl(pl.total)}/msc.`:'Pozycje płacone kartą oznaczysz w ich edycji.'}`,fields:[
+      {k:'on',label:'Płacę kartą i co miesiąc spłacam cały wyciąg',type:'check',value:c.on},
+      {k:'name',label:'Nazwa karty',value:c.name,ph:'np. nazwa banku'},
+      {k:'target',label:'Próg wydatków',type:'amount',suf:'zł/msc',value:c.target||'',min:0,half:1,ph:'bez progu'},
+      {k:'period',label:'Próg liczony',type:'select',opts:[['month','w miesiącu'],['cycle','w cyklu wyciągu']],value:c.period,half:1},
+      {k:'benefitName',label:'Korzyść za próg',value:c.benefitName,ph:'np. telefon za 0 zł',half:1},
+      {k:'benefit',label:'Warta miesięcznie',type:'amount',value:c.benefit||'',min:0,half:1},
+      {k:'close',label:'Dzień zamknięcia wyciągu',type:'num',value:c.close??'',min:1,max:31,ph:'koniec miesiąca',half:1},
+      {k:'due',label:'Dzień spłaty wyciągu',type:'num',value:c.due??'',min:1,max:31,ph:'1–31',half:1,badge:c.on&&!c.due},
+      {k:'limit',label:'Limit karty',type:'amount',value:c.limit??'',min:0,half:1,ph:'opcjonalnie'},
+      {k:'debt',label:'Dług na tej karcie',type:'select',opts:[['','brak'],...S.debts.map(d=>[d.id,d.name])],value:c.debt||'',half:1,hint:'Np. plan ratalny — zajmuje część limitu'}],
+      onSubmit(v){if(v.on&&!c.on){v.since=today();v.quick=true}v.target=v.target||0;v.benefit=v.benefit||0;Object.assign(c,v)}});
+  },
+  cardPay(d){
+    const st=cardState(),c=d.c?cardCycle(d.c):st.due[0]||st.open,cl=c.closed;
+    sheet({title:cl?`Spłata wyciągu z ${dLabel(c.close)}`:'Wcześniejsza spłata karty',
+      desc:cl?`Zapisane zakupy kartą w tym wyciągu: ${zl(c.spent)}${c.paid>0?`, już spłacono ${zl(c.paid)}`:''}. Wpisz kwotę z wyciągu banku — jeśli jest inna, pokażę różnicę (zwykle to niezapisane wydatki).`
+        :`Bieżący wyciąg zamyka się ${dLabel(c.close)}, do tej pory ${zl(c.due)}. Spłata przed zamknięciem zmniejsza wyciąg i zwalnia limit.`,
+      fields:[{k:'amount',label:'Kwota spłaty',type:'amount',value:c.due||'',req:1,min:0.01,auto:1,half:1},{k:'date',label:'Data',type:'date',value:today(),req:1,half:1},
+        ...(cl?[{k:'full',label:'To cały wyciąg — nic nie zostaje do spłaty',type:'check',value:true}]:[])],submit:'Zapisz spłatę',
+      onSubmit(v){
+        S.cardPays.push({id:uid(),cycle:c.ym,date:v.date,amount:v.amount,calc:c.due,full:!!v.full});
+        const left=v.full?0:Math.max(0,r2(c.due-v.amount));
+        setTimeout(()=>toast(cl&&left>0?`Zapisano. Zostało ${zl(left)} — niespłacona część wyciągu to odsetki.`:'Spłata karty zapisana. Pamiętaj o przelewie w banku.'),50);
+      }});
+  },
+  cardPayDel(d){confirmSheet('Usunąć spłatę?','Kwota wróci do sumy do spłaty.','Usuń wpis',()=>{S.cardPays=S.cardPays.filter(p=>p.id!==d.id)})},
   assetAdd(){ACT.assetEdit({})},
   assetEdit(d){
     const as=S.goals.assets,a=as.find(x=>x.id===d.id);
@@ -1291,7 +1513,14 @@ const ACT={
   async copyJson(){try{const prev=S.settings.lastExport;S.settings.lastExport=Date.now();await navigator.clipboard.writeText(JSON.stringify(S)).catch(e=>{S.settings.lastExport=prev;throw e});save(false);render();toast('Dane skopiowane — wklej je na drugim urządzeniu')}catch(e){toast('Nie udało się skopiować — użyj zapisu do pliku')}},
   pasteJson(){sheet({title:'Wklej dane',desc:'Wklej tekst skopiowany przyciskiem „Kopiuj dane” na innym urządzeniu.',fields:[{k:'json',label:'Dane (JSON)',type:'area',req:1}],submit:'Dalej',
     onSubmit(v){$('#sheet').close();setTimeout(()=>askImport(v.json),0);return false}})},
-  reset(){confirmSheet('Wyczyścić wszystkie dane?','Usunie z tego urządzenia wydatki, długi, budżet i ustawienia. Tego nie da się cofnąć — jeśli dane są Ci potrzebne, najpierw zapisz je do pliku.','Wyczyść wszystko',()=>{setTimeout(()=>{const th=S.settings.theme;S=defaults();S.settings.theme=th;U.ym=ymNow();save(false);render();toast('Dane wyczyszczone')},0)})},
+  async syncOn(){try{await syncEnable();render();ACT.syncCopy();syncCheck()}catch(e){toast('Ta przeglądarka nie pozwala włączyć szyfrowania')}},
+  async syncCopy(){
+    try{await navigator.clipboard.writeText(syncCode());toast('Kod skopiowany — wklej go w rozmowie z Claude')}
+    catch(e){sheet({title:'Kod urządzenia',desc:'Zaznacz i skopiuj cały kod, a potem wklej go w rozmowie z Claude.',fields:[{k:'code',label:'Kod',type:'area',value:syncCode()}],submit:'Gotowe',onSubmit(){}})}
+  },
+  syncNow(){syncCheck(true)},
+  syncOff(){confirmSheet('Wyłączyć zmiany od Claude?','To urządzenie przestanie pobierać paczki, a jego klucz zostanie usunięty. Dane w aplikacji zostają bez zmian.','Wyłącz',()=>{DEV=null;try{localStorage.removeItem(SYNC_KEY)}catch(e){}})},
+  reset(){confirmSheet('Wyczyścić wszystkie dane?','Usunie z tego urządzenia wydatki, długi, budżet i ustawienia. Tego nie da się cofnąć — jeśli dane są Ci potrzebne, najpierw zapisz je do pliku.','Wyczyść wszystko',()=>{setTimeout(()=>{const th=S.settings.theme,sl=S.sync.last;S=defaults();S.settings.theme=th;S.sync.last=sl;U.ym=ymNow();save(false);render();toast('Dane wyczyszczone')},0)})},
 };
 /* Wczytywanie pliku: porównuje znaczniki czasu, żeby starszy plik nie nadpisał nowszych danych przez pomyłkę. */
 function askImport(text){
@@ -1301,10 +1530,11 @@ function askImport(text){
   confirmSheet('Wczytać dane z pliku?',`<strong>Plik:</strong> stan z ${tsLabel(d.updatedAt)}<br><strong>To urządzenie:</strong> ostatnia zmiana ${tsLabel(S.updatedAt)}<br><br>${older?'<span style="color:var(--danger);font-weight:650">Uwaga: plik jest starszy niż dane na tym urządzeniu.</span> ':same?'To ten sam stan danych. ':d.updatedAt?'Plik jest nowszy. ':''}Wczytanie zastąpi wszystko, co jest teraz na tym urządzeniu.`,older?'Wczytaj mimo to':'Wczytaj',()=>{setTimeout(()=>applyImport(d),0)});
   return true;
 }
-function applyImport(d){const th=S.settings.theme;S=migrate(d);S.settings.theme=th;U.ym=ymNow();save(false);render();toast('Dane wczytane — autozapis działa dalej na tym urządzeniu')}
+function applyImport(d){const th=S.settings.theme;S=migrate(d);S.settings.theme=th;U.ym=ymNow();save(false);render();toast('Dane wczytane — autozapis działa dalej na tym urządzeniu');syncCheck()}
 const CHG={
   pay(d){togglePay(d.key,d.ym);done()},
   simopt(d,el){S.settings[d.k]=el.checked;done()},
+  qcard(d,el){S.card.quick=el.checked;save(false)},
 };
 
 /* ---------- zdarzenia ---------- */
@@ -1335,7 +1565,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>render(
 addEventListener('storage',e=>{if(e.key===KEY&&e.newValue){try{S=migrate(JSON.parse(e.newValue));render()}catch(x){}}});
 let _rz;addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(drawCharts,120)});
 if(window.visualViewport){const vv=visualViewport,kb=()=>document.documentElement.style.setProperty('--kb',Math.max(0,innerHeight-vv.height-vv.offsetTop)+'px');vv.addEventListener('resize',kb);vv.addEventListener('scroll',kb)}
-addEventListener('visibilitychange',()=>{if(!document.hidden&&U.ym!==ymNow()&&!S.expenses.length)U.ym=ymNow()});
+addEventListener('visibilitychange',()=>{if(!document.hidden&&U.ym!==ymNow()&&!S.expenses.length)U.ym=ymNow();if(!document.hidden)syncCheck()});
 
 /* ---------- render ---------- */
 const VIEWS={start:vStart,budzet:vBudzet,dlugi:vDlugi,cele:vCele,ustawienia:vUstawienia};
@@ -1351,7 +1581,7 @@ function render(){
 }
 const h0=location.hash.slice(1);if(VIEWS[h0])U.tab=h0;
 U.hint=U.tab==='start'; /* podpowiedź o wczytaniu pliku: tylko przy wejściu do aplikacji */
-save(false);render();
+save(false);render();syncCheck();
 </script>
 </body>
 </html>
